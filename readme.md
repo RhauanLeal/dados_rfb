@@ -47,18 +47,31 @@ observações:
 # Tabelas geradas:
 
 > `empresa`: dados cadastrais da empresa em nível de matriz
+>
 > `empresa_porte`: tabela auxiliar com dados com o porte da empresa
-> `estabelecimento`: dados analíticos da empresa por unidade / estabelecimento (telefones, endereço, filial, etc)
+>
+>  `estabelecimento`: dados analíticos da empresa por unidade / estabelecimento (telefones, endereço, filial, etc)
+>
 > `estabelecimento_situacao_cadastral`: tabela auxiliar com dados da situacao cadastral das empresas
-> `info_dados`: dados da ultima atualização dos dados do ETL para verificar se os dados estão atualizados de acordo com o site da RFB
-> `socios`: dados cadastrais dos sócios das empresas
-> `socios_identificador`: tabela auxiliar com dados do tipo de sócio
-> `simples`: dados de MEI e Simples Nacional
-> `cnae`: código e descrição dos CNAEs
-> `quals`: tabela de qualificação das pessoas físicas - sócios, responsável e representante legal.
+>
+>  `info_dados`: dados da ultima atualização dos dados do ETL para verificar se os dados estão atualizados de acordo com o site da RFB
+>
+>  `socios`: dados cadastrais dos sócios das empresas
+>
+>  `socios_identificador`: tabela auxiliar com dados do tipo de sócio
+>
+>  `simples`: dados de MEI e Simples Nacional
+>
+>  `cnae`: código e descrição dos CNAEs
+>
+>  `quals`: tabela de qualificação das pessoas físicas - sócios, responsável e representante legal.
+>
 > `natju`: tabela de naturezas jurídicas - código e descrição.
+>
 > `moti`: tabela de motivos da situação cadastral - código e descrição.
+>
 > `pais`: tabela de países - código e descrição.
+>
 > `munic`: tabela de municípios - código e descrição.
 
 * No final do processamento é criado os índices nas tabelas
@@ -66,8 +79,9 @@ observações:
   - Pelo volume de dados, as tabelas  `empresa`, `estabelecimento`, `socios` e `simples` possuem índices para a coluna `cnpj_basico`, que é a principal chave de ligação entre elas.
 
 Para maiores informações, consulte o:
- - [Layout dos dados abertos do CNPJ](https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/cadastros/consultas/arquivos/NOVOLAYOUTDOSDADOSABERTOSDOCNPJ.pdf).
- - [Modelo de Entidade Relacionamento](https://github.com/aphonsoar/Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ/blob/master/Dados_RFB_ERD.png)
+
+- [Layout dos dados abertos do CNPJ](https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/cadastros/consultas/arquivos/NOVOLAYOUTDOSDADOSABERTOSDOCNPJ.pdf).
+- [Modelo de Entidade Relacionamento](https://github.com/aphonsoar/Receita_Federal_do_Brasil_-_Dados_Publicos_CNPJ/blob/master/Dados_RFB_ERD.png)
 
 ---
 
@@ -122,6 +136,7 @@ deactivate
 ## Execução do ETL:
 
 ### No linux:
+
 ``python3 etl_rfb_dados.py --etl``
 
 - para executar em segundo plano:
@@ -138,4 +153,3 @@ deactivate
 * execute Ambiente virtual `.\venv\Scripts\activate` depois o arquivo `python etl_rfb_dados.py --etl` e aguarde a finalização do processo.
 
 - para acompanhar a execução em tempo real veja o arquivo em `dados_rfb\logs\etl_rfb_dados_log.txt`
-
