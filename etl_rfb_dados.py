@@ -1189,14 +1189,14 @@ def etl_process():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ETL Receita Federal do Brasil")
     parser.add_argument(
-        "--inserir_indice",
-        action="store_true",
-        help="Cria índices nas tabelas do banco"
-    )
-    parser.add_argument(
         "--etl",
         action="store_true",
         help="Executa o processo completo de ETL"
+    )
+    parser.add_argument(
+        "--inserir_indice",
+        action="store_true",
+        help="Cria índices nas tabelas do banco"
     )
 
     args = parser.parse_args()
