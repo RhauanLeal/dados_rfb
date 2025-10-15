@@ -89,6 +89,10 @@ Para maiores informações, consulte o:
 
 1. Com o Postgres instalado, inicie a instância do servidor (pode ser local) e crie o banco de dados conforme o arquivo `dados_rfb.sql` ou conforme abaixo.
 
+- Conectar como postgres e executar o arquivo:
+sudo -u postgres psql -f dados_rfb.sql
+
+
    ```
     -- Criar a base de dados "dados_rfb"
    CREATEDATABASE "dados_rfb"
@@ -139,6 +143,8 @@ deactivate
 
 ``python3 etl_rfb_dados.py --etl``
 
+- # de permissão de execução
+  ``sudo chmod +x run_etl.sh``
 - para executar em segundo plano:
   ``sudo ./run_etl.sh``
 - Veja os processos em execução:

@@ -50,7 +50,6 @@ if not dotenv_path:
 # Carrega o arquivo
 load_dotenv(dotenv_path)
 
-
 def connect_db(autocommit=False):
     from urllib.parse import quote_plus
 
@@ -60,34 +59,63 @@ def connect_db(autocommit=False):
     port = os.getenv("DB_PORT") or "5432"
     database = os.getenv("DB_NAME")
 
-    # Validação básica
-    if not all([user, passw, host, database]):
+    # AVISO: Verificar se a senha está em branco ou vazia
+    if passw is None or passw.strip() == "":
+        logging.warning("⚠️  AVISO: A senha do banco de dados (DB_PASSWORD) está em branco ou vazia.")
+        logging.warning("Isso pode causar falhas de conexão se o PostgreSQL exigir autenticação.")
+        logging.warning("Verifique o arquivo .env e defina DB_PASSWORD=sua_senha")
+        
+        # Também exibe no console para alertar o usuário
+        print("\n⚠️  AVISO CRÍTICO: DB_PASSWORD está vazia!")
+        print("Edite o arquivo .env e adicione: DB_PASSWORD=sua_senha_postgres")
+        print("Para definir uma senha no PostgreSQL execute: sudo -u postgres psql -c \"\\password\"\n")
+
+    # Validação básica das variáveis obrigatórias
+    if not all([user, host, database]):
         logging.error("Erro: variáveis de ambiente DB_* incompletas no .env")
-        raise ValueError("Configuração do banco incompleta. Verifique o arquivo .env.")
+        missing = []
+        if not user: missing.append("DB_USER")
+        if not host: missing.append("DB_HOST") 
+        if not database: missing.append("DB_NAME")
+        logging.error(f"Variáveis faltando: {', '.join(missing)}")
+        raise ValueError(f"Configuração do banco incompleta. Variáveis faltando: {', '.join(missing)}")
 
     # Escapa caracteres especiais no usuário e senha
     user_escaped = quote_plus(user)
-    passw_escaped = quote_plus(passw)
+    passw_escaped = quote_plus(passw) if passw else ""
 
     # Monta a URL de conexão segura
     conn_str = f"postgresql://{user_escaped}:{passw_escaped}@{host}:{port}/{database}"
 
-    # SQLAlchemy engine
-    engine = create_engine(conn_str)
+    try:
+        # SQLAlchemy engine
+        engine = create_engine(conn_str)
+        
+        # Conexão psycopg2
+        conn = psycopg2.connect(
+            dbname=database,
+            user=user,
+            password=passw,
+            host=host,
+            port=port
+        )
 
-    # Conexão psycopg2
-    conn = psycopg2.connect(
-        dbname=database,
-        user=user,
-        password=passw,
-        host=host,
-        port=port
-    )
+        if autocommit:
+            conn.set_session(autocommit=True)
 
-    if autocommit:
-        conn.set_session(autocommit=True)
+        logging.info("✅ Conexão com o banco de dados estabelecida com sucesso")
+        return conn, engine
 
-    return conn, engine
+    except psycopg2.OperationalError as e:
+        logging.error(f"❌ Erro de conexão com o banco de dados: {e}")
+        if "password authentication failed" in str(e):
+            logging.error("Falha na autenticação. Verifique a senha no arquivo .env")
+        elif "database" in str(e).lower() and "does not exist" in str(e).lower():
+            logging.error("Banco de dados não existe. Execute o arquivo dados_rfb.sql primeiro")
+        raise
+    except Exception as e:
+        logging.error(f"❌ Erro inesperado na conexão: {e}")
+        raise
 
 
 # Gerar base URL dinâmica (Ano e Mês atual)
@@ -255,7 +283,7 @@ def create_tables(conn):
         INSERT INTO empresa_porte (codigo, descricao) VALUES
             (1, 'Microempresa'),
             (3, 'Empresa de Pequeno Porte'),
-            (5, 'Demais');
+            (5, 'Demais')
         ON CONFLICT (codigo) DO NOTHING;
 
         -- Tabela: estabelecimento
@@ -306,7 +334,7 @@ def create_tables(conn):
             (3, 'Suspensa'),
             (4, 'Inapta'),
             (5, 'Ativa Não Regular'),
-            (8, 'Baixada');
+            (8, 'Baixada')
         ON CONFLICT (codigo) DO NOTHING;
                     
         -- Tabela: moti
@@ -377,7 +405,7 @@ def create_tables(conn):
         INSERT INTO socios_identificador (codigo, descricao) VALUES
             (1, 'Pessoa Jurídica'),
             (2, 'Pessoa Física'),
-            (3, 'Sócio Estrangeiro');
+            (3, 'Sócio Estrangeiro')
         ON CONFLICT (codigo) DO NOTHING;                 
 
         COMMIT;
