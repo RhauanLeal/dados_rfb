@@ -11,6 +11,7 @@ import pathlib
 import gc
 import pandas as pd
 import psycopg2
+from pathlib import Path
 from sqlalchemy import create_engine
 from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from bs4 import BeautifulSoup
@@ -30,6 +31,11 @@ logging.basicConfig(
     encoding="utf-8"
 )
 
+# APENAS ADICIONE ESTA LINHA
+logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+
+logger = logging.getLogger(__name__)
+
 # Diretórios fixos para armazenar os arquivos
 BASE_DIR = pathlib.Path().resolve()  # Diretório do script
 OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
@@ -39,8 +45,17 @@ ERRO_FILES_PATH = BASE_DIR / "files_error"
 logging.info("Iniciando ETL - dados_rfb")
 
 # carrega o arquivo de configuração .env
-# Localiza o .env
-dotenv_path = find_dotenv()
+# Caminho relativo, subindo um nível para acessar dados_rfb/.env
+ENV_PATH_PARENT = BASE_DIR.parent / "dados_rfb_env" / ".env"
+
+# Fallback: .env dentro do próprio projeto (dev/teste)
+ENV_PATH_LOCAL = BASE_DIR / ".env"
+
+# Lógica automática:
+if os.path.exists(ENV_PATH_PARENT):
+    dotenv_path = find_dotenv(ENV_PATH_PARENT)
+else:
+    dotenv_path = find_dotenv(ENV_PATH_LOCAL)
 
 if not dotenv_path:
     logging.error("Arquivo de configuração .env não encontrado no diretório do projeto.")
@@ -49,6 +64,7 @@ if not dotenv_path:
 
 # Carrega o arquivo
 load_dotenv(dotenv_path)
+
 
 def connect_db(autocommit=False):
     from urllib.parse import quote_plus
@@ -250,168 +266,219 @@ def criar_tabela_info_dados():
 # Cria as tabelas no banco de dados se elas não existirem.
 def create_tables(conn):
     """
-    Cria as tabelas no banco de dados se elas não existirem.
+    Cria tabelas de forma segura, evitando conflitos com tipos
     """
     with conn.cursor() as cur:
-        cur.execute("""
-        BEGIN;
+        try:
+            # Tenta criar as tabelas normalmente
+            cur.execute("""
+            -- Tabela: cnae
+            CREATE TABLE IF NOT EXISTS public.cnae (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-        -- Tabela: cnae
-        CREATE TABLE IF NOT EXISTS public.cnae (
-            codigo text PRIMARY KEY,
-            descricao text
-        );
+            -- Tabela: empresa
+            CREATE TABLE IF NOT EXISTS public.empresa (
+                cnpj_basico text PRIMARY KEY,
+                razao_social text,
+                natureza_juridica text,
+                qualificacao_responsavel text,
+                capital_social double precision,
+                porte_empresa text,
+                ente_federativo_responsavel text
+            );
+                        
+            -- Tabela: empresa_porte
+            CREATE TABLE IF NOT EXISTS empresa_porte (
+                codigo INTEGER PRIMARY KEY,
+                descricao TEXT
+            );
 
-        -- Tabela: empresa
-        CREATE TABLE IF NOT EXISTS public.empresa (
-            cnpj_basico text PRIMARY KEY,
-            razao_social text,
-            natureza_juridica text,
-            qualificacao_responsavel text,
-            capital_social double precision,
-            porte_empresa text,
-            ente_federativo_responsavel text
-        );
-                    
-        -- Tabela: empresa_porte
-        CREATE TABLE IF NOT EXISTS empresa_porte (
-            codigo INTEGER PRIMARY KEY,
-            descricao TEXT
-        );
-        COMMENT ON TABLE empresa_porte IS '01-Microempresa 03-Empresa de Pequeno Porte 05-Demais';
+            -- Tabela: estabelecimento
+            CREATE TABLE IF NOT EXISTS public.estabelecimento (
+                cnpj_basico text,
+                cnpj_ordem text,
+                cnpj_dv text,
+                identificador_matriz_filial text,
+                nome_fantasia text,
+                situacao_cadastral text,
+                data_situacao_cadastral text,
+                motivo_situacao_cadastral text,
+                nome_cidade_exterior text,
+                pais text,
+                data_inicio_atividade text,
+                cnae_fiscal_principal text,
+                cnae_fiscal_secundaria text,
+                tipo_logradouro text,
+                logradouro text,
+                numero text,
+                complemento text,
+                bairro text,
+                cep text,
+                uf text,
+                municipio text,
+                ddd_1 text,
+                telefone_1 text,
+                ddd_2 text,
+                telefone_2 text,
+                ddd_fax text,
+                fax text,
+                correio_eletronico text,
+                situacao_especial text,
+                data_situacao_especial text,
+                PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
+            );
+                        
+            -- Tabela: estabelecimento_situacao_cadastral
+            CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (
+                codigo INTEGER PRIMARY KEY,
+                descricao TEXT
+            );
+                        
+            -- Tabela: moti
+            CREATE TABLE IF NOT EXISTS public.moti (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-        INSERT INTO empresa_porte (codigo, descricao) VALUES
-            (1, 'Microempresa'),
-            (3, 'Empresa de Pequeno Porte'),
-            (5, 'Demais')
-        ON CONFLICT (codigo) DO NOTHING;
+            -- Tabela: munic
+            CREATE TABLE IF NOT EXISTS public.munic (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-        -- Tabela: estabelecimento
-        CREATE TABLE IF NOT EXISTS public.estabelecimento (
-            cnpj_basico text,
-            cnpj_ordem text,
-            cnpj_dv text,
-            identificador_matriz_filial text,
-            nome_fantasia text,
-            situacao_cadastral text,
-            data_situacao_cadastral text,
-            motivo_situacao_cadastral text,
-            nome_cidade_exterior text,
-            pais text,
-            data_inicio_atividade text,
-            cnae_fiscal_principal text,
-            cnae_fiscal_secundaria text,
-            tipo_logradouro text,
-            logradouro text,
-            numero text,
-            complemento text,
-            bairro text,
-            cep text,
-            uf text,
-            municipio text,
-            ddd_1 text,
-            telefone_1 text,
-            ddd_2 text,
-            telefone_2 text,
-            ddd_fax text,
-            fax text,
-            correio_eletronico text,
-            situacao_especial text,
-            data_situacao_especial text,
-            PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
-        );
-                    
-        -- Tabela: estabelecimento_situacao_cadastral
-        CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (
-            codigo INTEGER PRIMARY KEY,
-            descricao TEXT
-        );
-        COMMENT ON TABLE estabelecimento_situacao_cadastral IS '01-Nula 02-Ativa 03-Suspensa 04-Inapta 05-Ativa Não Regular 08-Baixada';
+            -- Tabela: natju
+            CREATE TABLE IF NOT EXISTS public.natju (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-        INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES
-            (1, 'Nula'),
-            (2, 'Ativa'),
-            (3, 'Suspensa'),
-            (4, 'Inapta'),
-            (5, 'Ativa Não Regular'),
-            (8, 'Baixada')
-        ON CONFLICT (codigo) DO NOTHING;
-                    
-        -- Tabela: moti
-        CREATE TABLE IF NOT EXISTS public.moti (
-            codigo text PRIMARY KEY,
-            descricao text
-        );
+            -- Tabela: pais
+            CREATE TABLE IF NOT EXISTS public.pais (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-        -- Tabela: munic
-        CREATE TABLE IF NOT EXISTS public.munic (
-            codigo text PRIMARY KEY,
-            descricao text
-        );
+            -- Tabela: quals
+            CREATE TABLE IF NOT EXISTS public.quals (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-        -- Tabela: natju
-        CREATE TABLE IF NOT EXISTS public.natju (
-            codigo text PRIMARY KEY,
-            descricao text
-        );
+            -- Tabela: simples
+            CREATE TABLE IF NOT EXISTS public.simples (
+                cnpj_basico text PRIMARY KEY,
+                opcao_pelo_simples text,
+                data_opcao_simples text,
+                data_exclusao_simples text,
+                opcao_mei text,
+                data_opcao_mei text,
+                data_exclusao_mei text
+            );
 
-        -- Tabela: pais
-        CREATE TABLE IF NOT EXISTS public.pais (
-            codigo text PRIMARY KEY,
-            descricao text
-        );
+            -- Tabela: socios
+            CREATE TABLE IF NOT EXISTS public.socios (
+                cnpj_basico text PRIMARY KEY,
+                identificador_socio text,
+                nome_socio_razao_social text,
+                cpf_cnpj_socio text,
+                qualificacao_socio text,
+                data_entrada_sociedade text,
+                pais text,
+                representante_legal text,
+                nome_do_representante text,
+                qualificacao_representante_legal text,
+                faixa_etaria text
+            );
 
-        -- Tabela: quals
-        CREATE TABLE IF NOT EXISTS public.quals (
-            codigo text PRIMARY KEY,
-            descricao text
-        );
-
-        -- Tabela: simples
-        CREATE TABLE IF NOT EXISTS public.simples (
-            cnpj_basico text PRIMARY KEY,
-            opcao_pelo_simples text,
-            data_opcao_simples text,
-            data_exclusao_simples text,
-            opcao_mei text,
-            data_opcao_mei text,
-            data_exclusao_mei text
-        );
-
-        -- Tabela: socios
-        CREATE TABLE IF NOT EXISTS public.socios (
-            cnpj_basico text PRIMARY KEY,
-            identificador_socio text,
-            nome_socio_razao_social text,
-            cpf_cnpj_socio text,
-            qualificacao_socio text,
-            data_entrada_sociedade text,
-            pais text,
-            representante_legal text,
-            nome_do_representante text,
-            qualificacao_representante_legal text,
-            faixa_etaria text
-        );
-
-        COMMENT ON TABLE public.socios IS 'Tabela com os dados dos sócios das empresas';
-
-        -- Tabela: socios_identificador
-        CREATE TABLE IF NOT EXISTS socios_identificador (
-            codigo INTEGER PRIMARY KEY,
-            descricao TEXT
-        );
-        COMMENT ON TABLE socios_identificador IS '1-Pessoa Juridica 2-Pessoa Fisica 3-Sócio Estrangeiro';
-
-        INSERT INTO socios_identificador (codigo, descricao) VALUES
-            (1, 'Pessoa Jurídica'),
-            (2, 'Pessoa Física'),
-            (3, 'Sócio Estrangeiro')
-        ON CONFLICT (codigo) DO NOTHING;                 
-
-        COMMIT;
-        """)
-        conn.commit()
-    logging.info("Tabelas criadas/verificadas com sucesso!")
+            -- Tabela: socios_identificador
+            CREATE TABLE IF NOT EXISTS socios_identificador (
+                codigo INTEGER PRIMARY KEY,
+                descricao TEXT
+            );
+            """)
+            
+            # Inserts separados para evitar conflitos
+            cur.execute("""
+            INSERT INTO empresa_porte (codigo, descricao) VALUES
+                (1, 'Microempresa'),
+                (3, 'Empresa de Pequeno Porte'),
+                (5, 'Demais')
+            ON CONFLICT (codigo) DO NOTHING;
+            """)
+            
+            cur.execute("""
+            INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES
+                (1, 'Nula'),
+                (2, 'Ativa'),
+                (3, 'Suspensa'),
+                (4, 'Inapta'),
+                (5, 'Ativa Não Regular'),
+                (8, 'Baixada')
+            ON CONFLICT (codigo) DO NOTHING;
+            """)
+            
+            cur.execute("""
+            INSERT INTO socios_identificador (codigo, descricao) VALUES
+                (1, 'Pessoa Jurídica'),
+                (2, 'Pessoa Física'),
+                (3, 'Sócio Estrangeiro')
+            ON CONFLICT (codigo) DO NOTHING;
+            """)
+            
+            conn.commit()
+            logging.info("Tabelas criadas/verificadas com sucesso!")
+            
+        except psycopg2.errors.UniqueViolation as e:
+            if 'pg_type_typname_nsp_index' in str(e):
+                logging.warning("Conflito de tipo detectado. Fazendo rollback e tentando abordagem alternativa...")
+                conn.rollback()
+                
+                # Abordagem alternativa: criar tabelas uma por uma
+                tables_sql = [
+                    """CREATE TABLE IF NOT EXISTS public.cnae (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text PRIMARY KEY, razao_social text, natureza_juridica text, qualificacao_responsavel text, capital_social double precision, porte_empresa text, ente_federativo_responsavel text);""",
+                    """CREATE TABLE IF NOT EXISTS empresa_porte (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
+                    """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial text, nome_fantasia text, situacao_cadastral text, data_situacao_cadastral text, motivo_situacao_cadastral text, nome_cidade_exterior text, pais text, data_inicio_atividade text, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio text, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial text, PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv));""",
+                    """CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
+                    """CREATE TABLE IF NOT EXISTS public.moti (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.munic (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.natju (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.pais (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.quals (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text PRIMARY KEY, opcao_pelo_simples text, data_opcao_simples text, data_exclusao_simples text, opcao_mei text, data_opcao_mei text, data_exclusao_mei text);""",
+                    """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text PRIMARY KEY, identificador_socio text, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio text, data_entrada_sociedade text, pais text, representante_legal text, nome_do_representante text, qualificacao_representante_legal text, faixa_etaria text);""",
+                    """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao TEXT);"""
+                ]
+                
+                for sql in tables_sql:
+                    try:
+                        cur.execute(sql)
+                        conn.commit()
+                    except psycopg2.errors.DuplicateTable:
+                        conn.rollback()
+                        logging.info("Tabela já existe, continuando...")
+                    except psycopg2.errors.UniqueViolation:
+                        conn.rollback()
+                        logging.info("Conflito de tipo ignorado, continuando...")
+                    except Exception as e:
+                        conn.rollback()
+                        logging.warning(f"Erro ao criar tabela: {e}, continuando...")
+                
+                # Inserts após criar todas as tabelas
+                try:
+                    cur.execute("INSERT INTO empresa_porte (codigo, descricao) VALUES (1, 'Microempresa'), (3, 'Empresa de Pequeno Porte'), (5, 'Demais') ON CONFLICT (codigo) DO NOTHING;")
+                    cur.execute("INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES (1, 'Nula'), (2, 'Ativa'), (3, 'Suspensa'), (4, 'Inapta'), (5, 'Ativa Não Regular'), (8, 'Baixada') ON CONFLICT (codigo) DO NOTHING;")
+                    cur.execute("INSERT INTO socios_identificador (codigo, descricao) VALUES (1, 'Pessoa Jurídica'), (2, 'Pessoa Física'), (3, 'Sócio Estrangeiro') ON CONFLICT (codigo) DO NOTHING;")
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    logging.warning(f"Erro nos inserts: {e}")
+                
+                logging.info("Tabelas criadas/verificadas com abordagem alternativa!")
+            else:
+                raise e
 
 
 # insere os dados na tabela info_dados
@@ -623,7 +690,7 @@ def etl_process():
         
         # Começa arquivos_empresa
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "empresa" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "empresa" ;')
         conn.commit()
         for arquivo in arquivos_empresa:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -689,7 +756,7 @@ def etl_process():
 
         # Começa arquivos_estabelecimento
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "estabelecimento" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "estabelecimento" ;')
         conn.commit()
         for arquivo in arquivos_estabelecimento:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -751,7 +818,7 @@ def etl_process():
 
         # Arquivos de socios:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "socios" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "socios" ;')
         conn.commit()
         for arquivo in arquivos_socios:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -816,7 +883,7 @@ def etl_process():
 
         # Arquivos de simples:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "simples" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "simples" ;')
         conn.commit()
         for arquivo in arquivos_simples:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -880,7 +947,7 @@ def etl_process():
 
         # Arquivos de cnae:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "cnae" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "cnae" ;')
         conn.commit()
         for arquivo in arquivos_cnae:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -926,7 +993,7 @@ def etl_process():
 
         # Arquivos de moti:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "moti" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "moti" ;')
         conn.commit()
         for arquivo in arquivos_moti:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -977,7 +1044,7 @@ def etl_process():
 
         # Arquivos de munic:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "munic" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "munic" ;')
         conn.commit()
         for arquivo in arquivos_munic:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -1028,7 +1095,7 @@ def etl_process():
 
         # Arquivos de natju:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "natju" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "natju" ;')
         conn.commit()
         for arquivo in arquivos_natju:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -1079,7 +1146,7 @@ def etl_process():
 
         # Arquivos de pais:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "pais" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "pais" ;')
         conn.commit()
         for arquivo in arquivos_pais:
             logging.info(f"Trabalhando no arquivo: {arquivo}")
@@ -1130,7 +1197,7 @@ def etl_process():
 
         # Arquivos de qualificação de sócios:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "quals" CASCADE;')
+        cur.execute('DROP TABLE IF EXISTS "quals" ;')
         conn.commit()
         for arquivo in arquivos_quals:
             logging.info(f"Trabalhando no arquivo: {arquivo}")

@@ -1,0 +1,26 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dados_rfb-etl
+    working_dir: /code
+    volumes:
+      - ../dados_rfb:/code
+      - ../dados_rfb_env:/dados_rfb_env:ro
+    env_file:
+      - ../dados_rfb_env/.env
+    environment:
+      - TZ=America/Boa_Vista
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - snfisc-network
+
+networks:
+  snfisc-network:
+    external: true

@@ -159,3 +159,31 @@ deactivate
 * execute Ambiente virtual `.\venv\Scripts\activate` depois o arquivo `python etl_rfb_dados.py --etl` e aguarde a finalização do processo.
 
 - para acompanhar a execução em tempo real veja o arquivo em `dados_rfb\logs\etl_rfb_dados_log.txt`
+
+# Bonus Docker!
+
+# 1. Construa a imagem
+docker compose build --no-cache
+
+# 4. Suba o container
+docker compose up -d
+
+# 5. Verifique se está rodando - Deve mostrar status "Up"
+docker ps
+
+# 6. Agora execute o ETL
+
+# Executar o script ETL (tem que esperar com o terminal aberto...)
+docker exec -it dados_rfb-etl python etl_rfb_dados.py --etl
+
+# Ou em segundo plano
+docker exec -d dados_rfb-etl python etl_rfb_dados.py --etl
+
+# ver Logs
+docker exec dados_rfb-etl cat /code/logs/etl_rfb_dados_log.txt
+
+# Acessar o container para debug
+docker exec -it dados_rfb-etl bash
+
+# !Parar o container
+docker compose down
