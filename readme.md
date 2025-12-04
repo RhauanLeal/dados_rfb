@@ -50,21 +50,21 @@ observações:
 >
 > `empresa_porte`: tabela auxiliar com dados com o porte da empresa
 >
->  `estabelecimento`: dados analíticos da empresa por unidade / estabelecimento (telefones, endereço, filial, etc)
+> `estabelecimento`: dados analíticos da empresa por unidade / estabelecimento (telefones, endereço, filial, etc)
 >
 > `estabelecimento_situacao_cadastral`: tabela auxiliar com dados da situacao cadastral das empresas
 >
->  `info_dados`: dados da ultima atualização dos dados do ETL para verificar se os dados estão atualizados de acordo com o site da RFB
+> `info_dados`: dados da ultima atualização dos dados do ETL para verificar se os dados estão atualizados de acordo com o site da RFB
 >
->  `socios`: dados cadastrais dos sócios das empresas
+> `socios`: dados cadastrais dos sócios das empresas
 >
->  `socios_identificador`: tabela auxiliar com dados do tipo de sócio
+> `socios_identificador`: tabela auxiliar com dados do tipo de sócio
 >
->  `simples`: dados de MEI e Simples Nacional
+> `simples`: dados de MEI e Simples Nacional
 >
->  `cnae`: código e descrição dos CNAEs
+> `cnae`: código e descrição dos CNAEs
 >
->  `quals`: tabela de qualificação das pessoas físicas - sócios, responsável e representante legal.
+> `quals`: tabela de qualificação das pessoas físicas - sócios, responsável e representante legal.
 >
 > `natju`: tabela de naturezas jurídicas - código e descrição.
 >
@@ -90,19 +90,19 @@ Para maiores informações, consulte o:
 1. Com o Postgres instalado, inicie a instância do servidor (pode ser local) e crie o banco de dados conforme o arquivo `dados_rfb.sql` ou conforme abaixo.
 
 - Conectar como postgres e executar o arquivo:
-sudo -u postgres psql -f dados_rfb.sql
+  sudo -u postgres psql -f dados_rfb.sql
 
+  ```
+   -- Criar a base de dados "dados_rfb"
+  CREATEDATABASE "dados_rfb"
+      WITH  
+  OWNER= postgres
+      ENCODING='UTF8'
+      CONNECTIONLIMIT= -1;
+  COMMENT ONDATABASE"dados_rfb"
+      IS 'Base de dados dos dados públicos de CNPJ da Receita Federal do Brasil';
+  ```
 
-   ```
-    -- Criar a base de dados "dados_rfb"
-   CREATEDATABASE "dados_rfb"
-       WITH  
-   OWNER= postgres
-       ENCODING='UTF8'
-       CONNECTIONLIMIT= -1;
-   COMMENT ONDATABASE"dados_rfb"
-       IS 'Base de dados dos dados públicos de CNPJ da Receita Federal do Brasil';
-   ```
 2. Crie um arquivo `.env` no diretório raiz, conforme as variáveis de ambiente do seu ambiente de trabalho (localhost) ou utilize como referência o arquivo `.env_template` você pode também, por exemplo, renomear o arquivo de `.env_template` para apenas `.env` e então utilizá-lo:
 
    - `DB_HOST`: host da conexão com o BD
@@ -144,6 +144,7 @@ deactivate
 ``python3 etl_rfb_dados.py --etl``
 
 - # de permissão de execução
+
   ``sudo chmod +x run_etl.sh``
 - para executar em segundo plano:
   ``sudo ./run_etl.sh``
@@ -163,27 +164,56 @@ deactivate
 # Bonus Docker!
 
 # 1. Construa a imagem
+
 docker compose build --no-cache
 
 # 4. Suba o container
+
 docker compose up -d
 
 # 5. Verifique se está rodando - Deve mostrar status "Up"
+
 docker ps
 
 # 6. Agora execute o ETL
 
 # Executar o script ETL (tem que esperar com o terminal aberto...)
+
 docker exec -it dados_rfb-etl python etl_rfb_dados.py --etl
 
 # Ou em segundo plano
+
 docker exec -d dados_rfb-etl python etl_rfb_dados.py --etl
 
 # ver Logs
+
 docker exec dados_rfb-etl cat /code/logs/etl_rfb_dados_log.txt
 
 # Acessar o container para debug
+
 docker exec -it dados_rfb-etl bash
 
+# Ver logs do container
+docker logs dados_rfb-etl
+
+# Seguir logs em tempo real (como tail -f)
+docker logs -f dados_rfb-etl
+
+# Ver últimas linhas
+docker logs --tail 50 dados_rfb-etl
+
+# Ver logs com timestamp
+docker logs -t dados_rfb-etl
+
+# Combinar opções
+docker logs -f -t --tail 100 dados_rfb-etl
+
+# Limpar a imagem antiga (opcional)
+docker rmi dados_rfb-etl
+
+# Construir com a nova sintaxe
+docker build --no-cache -t dados_rfb-etl .
+
 # !Parar o container
+
 docker compose down

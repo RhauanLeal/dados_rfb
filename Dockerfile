@@ -1,8 +1,8 @@
 # Dockerfile
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # Instala dependências do sistema, incluindo locales e curl para healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \

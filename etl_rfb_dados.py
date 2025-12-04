@@ -2,7 +2,6 @@
 import argparse
 import os
 import sys
-import time
 import logging
 import shutil
 import requests
@@ -11,7 +10,6 @@ import pathlib
 import gc
 import pandas as pd
 import psycopg2
-from pathlib import Path
 from sqlalchemy import create_engine
 from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from bs4 import BeautifulSoup
@@ -21,19 +19,27 @@ from datetime import datetime
 LOG_DIR = pathlib.Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
+
+# Debug: ver todos os loggers configurados
+print("Loggers antes da configuração:", logging.Logger.manager.loggerDict.keys())
+
 # Criar arquivo de log com codificação UTF-8
 log_file = LOG_DIR / "etl_rfb_dados_log.txt"
+
+# Configuração básica para arquivo
 logging.basicConfig(
-    filename=log_file,
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    encoding="utf-8"
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 
-# APENAS ADICIONE ESTA LINHA
-logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+logger = logging.getLogger(__name__)
 
+# Verificar se configurou corretamente
 logger = logging.getLogger(__name__)
 
 # Diretórios fixos para armazenar os arquivos
@@ -42,7 +48,7 @@ OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
 EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
 
-logging.info("Iniciando ETL - dados_rfb")
+logger.info("Iniciando ETL - dados_rfb")
 
 # carrega o arquivo de configuração .env
 # Caminho relativo, subindo um nível para acessar dados_rfb/.env
@@ -58,13 +64,57 @@ else:
     dotenv_path = find_dotenv(ENV_PATH_LOCAL)
 
 if not dotenv_path:
-    logging.error("Arquivo de configuração .env não encontrado no diretório do projeto.")
-    logging.info("ETL Finalizado.")
+    logger.error("Arquivo de configuração .env não encontrado no diretório do projeto.")
+    logger.info("ETL Finalizado.")
     sys.exit(1)
 
 # Carrega o arquivo
 load_dotenv(dotenv_path)
 
+def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
+    '''
+    Converte segundos em uma frase de Horas Minutos e Segundos
+
+    Exemplo:
+    - Entrada datetime: tempo_inicial = datetime.now(), tempo_final = datetime.now()
+    - Saída str: String com o a frase horas minutos e segundos.
+    '''
+    # Calcula a diferença entre as datas
+    diferenca = tempo_final - tempo_inicial
+    total_segundos = int(diferenca.total_seconds())
+
+    # Convertendo para horas, minutos e segundos
+    horas = total_segundos // 3600
+    minutos = (total_segundos % 3600) // 60
+    segundos = total_segundos % 60
+
+    # Criando as strings de cada componente
+    hora = ''
+    minuto = ''
+    segundo = ''
+
+    if horas == 1:
+        hora = f'{horas} hora'
+    elif horas > 1:
+        hora = f'{horas} horas'
+
+    if minutos == 1:
+        minuto = f'{minutos} minuto'
+    elif minutos > 1:
+        minuto = f'{minutos} minutos'
+
+    if segundos == 1:
+        segundo = f'{segundos} segundo'
+    elif segundos > 1:
+        segundo = f'{segundos} segundos'
+    elif segundos < 1:
+        segundo = f'{diferenca} segundos'
+
+    # Juntando os componentes não vazios
+    componentes = [hora, minuto, segundo]
+    tempo = ', '.join([comp for comp in componentes if comp])
+
+    return tempo
 
 def connect_db(autocommit=False):
     from urllib.parse import quote_plus
@@ -77,9 +127,9 @@ def connect_db(autocommit=False):
 
     # AVISO: Verificar se a senha está em branco ou vazia
     if passw is None or passw.strip() == "":
-        logging.warning("⚠️  AVISO: A senha do banco de dados (DB_PASSWORD) está em branco ou vazia.")
-        logging.warning("Isso pode causar falhas de conexão se o PostgreSQL exigir autenticação.")
-        logging.warning("Verifique o arquivo .env e defina DB_PASSWORD=sua_senha")
+        logger.warning("⚠️  AVISO: A senha do banco de dados (DB_PASSWORD) está em branco ou vazia.")
+        logger.warning("Isso pode causar falhas de conexão se o PostgreSQL exigir autenticação.")
+        logger.warning("Verifique o arquivo .env e defina DB_PASSWORD=sua_senha")
         
         # Também exibe no console para alertar o usuário
         print("\n⚠️  AVISO CRÍTICO: DB_PASSWORD está vazia!")
@@ -88,12 +138,12 @@ def connect_db(autocommit=False):
 
     # Validação básica das variáveis obrigatórias
     if not all([user, host, database]):
-        logging.error("Erro: variáveis de ambiente DB_* incompletas no .env")
+        logger.error("Erro: variáveis de ambiente DB_* incompletas no .env")
         missing = []
         if not user: missing.append("DB_USER")
         if not host: missing.append("DB_HOST") 
         if not database: missing.append("DB_NAME")
-        logging.error(f"Variáveis faltando: {', '.join(missing)}")
+        logger.error(f"Variáveis faltando: {', '.join(missing)}")
         raise ValueError(f"Configuração do banco incompleta. Variáveis faltando: {', '.join(missing)}")
 
     # Escapa caracteres especiais no usuário e senha
@@ -119,18 +169,18 @@ def connect_db(autocommit=False):
         if autocommit:
             conn.set_session(autocommit=True)
 
-        logging.info("✅ Conexão com o banco de dados estabelecida com sucesso")
+        logger.info("✅ Conexão com o banco de dados estabelecida com sucesso")
         return conn, engine
 
     except psycopg2.OperationalError as e:
-        logging.error(f"❌ Erro de conexão com o banco de dados: {e}")
+        logger.error(f"❌ Erro de conexão com o banco de dados: {e}")
         if "password authentication failed" in str(e):
-            logging.error("Falha na autenticação. Verifique a senha no arquivo .env")
+            logger.error("Falha na autenticação. Verifique a senha no arquivo .env")
         elif "database" in str(e).lower() and "does not exist" in str(e).lower():
-            logging.error("Banco de dados não existe. Execute o arquivo dados_rfb.sql primeiro")
+            logger.error("Banco de dados não existe. Execute o arquivo dados_rfb.sql primeiro")
         raise
     except Exception as e:
-        logging.error(f"❌ Erro inesperado na conexão: {e}")
+        logger.error(f"❌ Erro inesperado na conexão: {e}")
         raise
 
 
@@ -141,7 +191,7 @@ def verificar_nova_atualizacao():
     response = requests.get(base_url)
 
     if response.status_code != 200:
-        logging.error(f"Erro ao acessar {base_url}: código {response.status_code}")
+        logger.error(f"Erro ao acessar {base_url}: código {response.status_code}")
         return None
 
     # Parse do HTML
@@ -165,7 +215,7 @@ def verificar_nova_atualizacao():
                         continue
 
     if not datas:
-        logging.info("Nenhuma pasta válida encontrada no site da RFB.")
+        logger.info("Nenhuma pasta válida encontrada no site da RFB.")
         return None
     
     # Identifica a mais recente
@@ -190,7 +240,7 @@ def verificar_nova_atualizacao():
         conn.close()
 
         if existe:
-            logging.info("A versão mais recente já está registrada no banco de dados.")
+            logger.info("A versão mais recente já está registrada no banco de dados.")
             return None
 
     # Se não existir, retorna os dados para serem usados posteriormente
@@ -259,7 +309,7 @@ def criar_tabela_info_dados():
         """)
 
         conn.commit()
-        logging.info("Tabelas info_dados e estruturas criadas/verificadas com sucesso!")
+        logger.info("Tabelas info_dados e estruturas criadas/verificadas com sucesso!")
     conn.close()
 
 
@@ -428,11 +478,11 @@ def create_tables(conn):
             """)
             
             conn.commit()
-            logging.info("Tabelas criadas/verificadas com sucesso!")
+            logger.info("Tabelas criadas/verificadas com sucesso!")
             
         except psycopg2.errors.UniqueViolation as e:
             if 'pg_type_typname_nsp_index' in str(e):
-                logging.warning("Conflito de tipo detectado. Fazendo rollback e tentando abordagem alternativa...")
+                logger.warning("Conflito de tipo detectado. Fazendo rollback e tentando abordagem alternativa...")
                 conn.rollback()
                 
                 # Abordagem alternativa: criar tabelas uma por uma
@@ -458,13 +508,13 @@ def create_tables(conn):
                         conn.commit()
                     except psycopg2.errors.DuplicateTable:
                         conn.rollback()
-                        logging.info("Tabela já existe, continuando...")
+                        logger.info("Tabela já existe, continuando...")
                     except psycopg2.errors.UniqueViolation:
                         conn.rollback()
-                        logging.info("Conflito de tipo ignorado, continuando...")
+                        logger.info("Conflito de tipo ignorado, continuando...")
                     except Exception as e:
                         conn.rollback()
-                        logging.warning(f"Erro ao criar tabela: {e}, continuando...")
+                        logger.warning(f"Erro ao criar tabela: {e}, continuando...")
                 
                 # Inserts após criar todas as tabelas
                 try:
@@ -474,9 +524,9 @@ def create_tables(conn):
                     conn.commit()
                 except Exception as e:
                     conn.rollback()
-                    logging.warning(f"Erro nos inserts: {e}")
+                    logger.warning(f"Erro nos inserts: {e}")
                 
-                logging.info("Tabelas criadas/verificadas com abordagem alternativa!")
+                logger.info("Tabelas criadas/verificadas com abordagem alternativa!")
             else:
                 raise e
 
@@ -493,7 +543,7 @@ def inserir_info_dados(conn, info):
     """, (info['ano'], info['mes'], info['data_atualizacao']))
 
     conn.commit()
-    logging.info(f"Atualização inserida no banco: {info['ano']}-{info['mes']:02d}")
+    logger.info(f"Atualização inserida no banco: {info['ano']}-{info['mes']:02d}")
 
 
 # traz a lista de arquivos da url
@@ -503,18 +553,18 @@ def get_files(base_url):
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        logging.info(f"Baixando arquivos do mês: {base_url}")
+        logger.info(f"Baixando arquivos do mês: {base_url}")
 
         # Identificar arquivos ZIP disponíveis para download
         files = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".zip")]
 
         if not files:
-            logging.info("Nenhum arquivo .zip encontrado para o mês atual.")
+            logger.info("Nenhum arquivo .zip encontrado para o mês atual.")
             return []
 
         return sorted(files)
     else:
-        logging.error(f'Erro ao acessar {base_url}: código {response.status_code}')
+        logger.error(f'Erro ao acessar {base_url}: código {response.status_code}')
         return []
 
 
@@ -527,7 +577,7 @@ def check_diff(url, file_name):
         response = requests.head(url, timeout=10)
         new_size = int(response.headers.get("content-length", 0))
     except Exception as e:
-        logging.warning(f"Erro ao verificar cabeçalho de {url}: {e}")
+        logger.warning(f"Erro ao verificar cabeçalho de {url}: {e}")
         return True
 
     old_size = os.path.getsize(file_name)
@@ -544,22 +594,22 @@ def download_file(url, output_path):
     file_name = os.path.join(output_path, url.split("/")[-1])
 
     if not check_diff(url, file_name):
-            logging.info(f"Arquivo {file_name} já está atualizado.")
+            logger.info(f"Arquivo {file_name} já está atualizado.")
             return file_name
     
-    logging.info(f"Baixando {file_name}...")
+    logger.info(f"Baixando {file_name}...")
     
     with open(file_name, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
 
-    logging.info(f"Download concluído para {file_name}")
+    logger.info(f"Download concluído para {file_name}")
     return file_name
 
 
 # Função para extrair arquivos ZIP
 def extract_files(zip_path, extract_to):
-    logging.info(f"Extraindo {zip_path} para {extract_to}...")
+    logger.info(f"Extraindo {zip_path} para {extract_to}...")
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(extract_to)
 
@@ -570,7 +620,7 @@ def criar_indices():
         conn, _ = connect_db(autocommit=True)  # <- agora com autocommit
         cur = conn.cursor()
 
-        logging.info("Iniciando criação dos índices...")
+        logger.info("Iniciando criação dos índices...")
 
         indices = [
             ("empresa", "cnpj_basico"),
@@ -584,25 +634,27 @@ def criar_indices():
             try:
                 sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
                 cur.execute(sql)
-                logging.info(f"Índice {nome_indice} criado com sucesso.")
+                logger.info(f"Índice {nome_indice} criado com sucesso.")
             except Exception as e:
-                logging.error(f"Erro ao criar o índice {nome_indice}: {e}", exc_info=True)
+                logger.error(f"Erro ao criar o índice {nome_indice}: {e}", exc_info=True)
 
         cur.close()
         conn.close()
         gc.collect()
-        logging.info("Criação dos índices finalizada.")
+        logger.info("Criação dos índices finalizada.")
 
     except Exception as e:
-        logging.error(f"Erro geral ao criar índices: {e}", exc_info=True)
+        logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
+        logger.critical("Não foi possível iniciar o aplicativo")
+        sys.exit(1)
 
 
 def move_file_error(extracted_file_path, arquivo):
     try:
         shutil.move(extracted_file_path, ERRO_FILES_PATH / arquivo)
-        logging.info(f"Arquivo {arquivo} movido para a pasta de erro: {ERRO_FILES_PATH}")
+        logger.info(f"Arquivo {arquivo} movido para a pasta de erro: {ERRO_FILES_PATH}")
     except Exception as move_err:
-        logging.error(f"Erro ao mover o arquivo {arquivo} para a pasta erro: {move_err}")
+        logger.error(f"Erro ao mover o arquivo {arquivo} para a pasta erro: {move_err}")
 
 
 # Função principal do ETL
@@ -613,15 +665,15 @@ def etl_process():
         EXTRACTED_FILES_PATH.mkdir(parents=True, exist_ok=True)
         ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
 
-        logging.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Extraídos: {EXTRACTED_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
+        logger.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Extraídos: {EXTRACTED_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
 
-        start_time = time.time()
+        start_time = datetime.now()
 
         info = verificar_nova_atualizacao()
         
         files = get_files(info['url'])
 
-        logging.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
+        logger.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
 
         # Baixar arquivos
         zip_files = [download_file(info['url'] + file, OUTPUT_FILES_PATH) for file in files]
@@ -630,7 +682,7 @@ def etl_process():
         for zip_file in zip_files:
             extract_files(zip_file, EXTRACTED_FILES_PATH)
 
-        logging.info("Todos os arquivos foram baixados e extraídos. Iniciando processamento dos dados.")
+        logger.info("Todos os arquivos foram baixados e extraídos. Iniciando processamento dos dados.")
         
         # Conectar ao banco de dados
         conn, engine = connect_db()
@@ -693,11 +745,11 @@ def etl_process():
         cur.execute('DROP TABLE IF EXISTS "empresa" ;')
         conn.commit()
         for arquivo in arquivos_empresa:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -722,12 +774,12 @@ def etl_process():
                     
                     try:
                         chunk.to_sql(name='empresa', con=engine, if_exists='append', index=False, chunksize=10_000)
-                        logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso!")
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso!")
                     except Exception as e:
-                        logging.error(f"Erro ao inserir chunk {i} do arquivo {arquivo}: {e}")
+                        logger.error(f"Erro ao inserir chunk {i} do arquivo {arquivo}: {e}")
                         try:
                             conn.rollback()
-                            logging.warning("Rollback realizado. Tentando inserir novamente o chunk...")
+                            logger.warning("Rollback realizado. Tentando inserir novamente o chunk...")
 
                             # Tenta de novo
                             chunk.to_sql(
@@ -737,13 +789,13 @@ def etl_process():
                                 index=False,
                                 chunksize=10_000
                             )
-                            logging.info(f"Chunk {i} reprocessado com sucesso!")
+                            logger.info(f"Chunk {i} reprocessado com sucesso!")
                         except Exception as segunda_falha:
-                            logging.error(f"Falha novamente ao reprocessar chunk {i}: {segunda_falha}")
+                            logger.error(f"Falha novamente ao reprocessar chunk {i}: {segunda_falha}")
                             break  # desiste desse arquivo
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
@@ -752,18 +804,18 @@ def etl_process():
                     del chunk
                 gc.collect()
 
-        logging.info("Arquivos de empresa finalizados!")
+        logger.info("Arquivos de empresa finalizados!")
 
         # Começa arquivos_estabelecimento
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "estabelecimento" ;')
         conn.commit()
         for arquivo in arquivos_estabelecimento:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
             
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -803,10 +855,10 @@ def etl_process():
                         chunksize=10_000
                     )
 
-                    logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
 
             finally:
@@ -814,18 +866,18 @@ def etl_process():
                     del chunk
                 gc.collect()
 
-        logging.info("Arquivos de estabelecimento finalizados!")
+        logger.info("Arquivos de estabelecimento finalizados!")
 
         # Arquivos de socios:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "socios" ;')
         conn.commit()
         for arquivo in arquivos_socios:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -867,10 +919,10 @@ def etl_process():
                         chunksize=10_000
                     )
 
-                    logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
@@ -879,18 +931,18 @@ def etl_process():
                     del chunk
                 gc.collect()
 
-        logging.info("Arquivos de socios finalizados!")
+        logger.info("Arquivos de socios finalizados!")
 
         # Arquivos de simples:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "simples" ;')
         conn.commit()
         for arquivo in arquivos_simples:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -932,10 +984,10 @@ def etl_process():
                         chunksize=10_000
                     )
 
-                    logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
             finally:
@@ -943,18 +995,18 @@ def etl_process():
                     del chunk
                 gc.collect()
 
-        logging.info("Arquivos do simples finalizados!")
+        logger.info("Arquivos do simples finalizados!")
 
         # Arquivos de cnae:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "cnae" ;')
         conn.commit()
         for arquivo in arquivos_cnae:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -978,10 +1030,10 @@ def etl_process():
                     chunksize=10_000
                 )
 
-                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
             finally:
@@ -989,18 +1041,18 @@ def etl_process():
                     del cnae
                 gc.collect()
 
-        logging.info("Arquivos de cnae finalizados!")
+        logger.info("Arquivos de cnae finalizados!")
 
         # Arquivos de moti:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "moti" ;')
         conn.commit()
         for arquivo in arquivos_moti:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1029,10 +1081,10 @@ def etl_process():
                     chunksize=10_000
                 )
 
-                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
             finally:
@@ -1040,18 +1092,18 @@ def etl_process():
                     del moti
                 gc.collect()
 
-        logging.info("Arquivos de moti finalizados!")
+        logger.info("Arquivos de moti finalizados!")
 
         # Arquivos de munic:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "munic" ;')
         conn.commit()
         for arquivo in arquivos_munic:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1080,10 +1132,10 @@ def etl_process():
                     chunksize=10_000
                 )
 
-                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
             finally:
@@ -1091,18 +1143,18 @@ def etl_process():
                     del munic
                 gc.collect()
 
-        logging.info("Arquivos de munic finalizados!")
+        logger.info("Arquivos de munic finalizados!")
 
         # Arquivos de natju:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "natju" ;')
         conn.commit()
         for arquivo in arquivos_natju:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1131,10 +1183,10 @@ def etl_process():
                     chunksize=10_000
                 )
 
-                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
             finally:
@@ -1142,18 +1194,18 @@ def etl_process():
                     del natju
                 gc.collect()
 
-        logging.info("Arquivos de natju finalizados!")
+        logger.info("Arquivos de natju finalizados!")
 
         # Arquivos de pais:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "pais" ;')
         conn.commit()
         for arquivo in arquivos_pais:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1182,10 +1234,10 @@ def etl_process():
                     chunksize=10_000
                 )
 
-                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
             finally:
@@ -1193,18 +1245,18 @@ def etl_process():
                     del pais
                 gc.collect()
 
-        logging.info("Arquivos de pais finalizados!")
+        logger.info("Arquivos de pais finalizados!")
 
         # Arquivos de qualificação de sócios:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "quals" ;')
         conn.commit()
         for arquivo in arquivos_quals:
-            logging.info(f"Trabalhando no arquivo: {arquivo}")
+            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1233,10 +1285,10 @@ def etl_process():
                     chunksize=10_000
                 )
 
-                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
             finally:
@@ -1246,7 +1298,7 @@ def etl_process():
 
         # Grava os dados e gera um txt com os arquivos com erro
         if arquivos_com_erro:
-            logging.warning(f"Arquivos com erro: {arquivos_com_erro}")
+            logger.warning(f"Arquivos com erro: {arquivos_com_erro}")
             
             with open("arquivos_com_erro.txt", "w", encoding="utf-8") as f:
                 for nome in arquivos_com_erro:
@@ -1261,10 +1313,10 @@ def etl_process():
         cur.close() # Fecha a conexão com o banco
         conn.close() # Fecha a conexão com o banco
 
-        logging.info("Arquivos de quals finalizados!")
+        logger.info("Arquivos de quals finalizados!")
 
         # Processo de inserção finalizado
-        logging.info('Processo de carga dos arquivos finalizado!')
+        logger.info('Processo de carga dos arquivos finalizado!')
 
         # Criação dos índices
         criar_indices()
@@ -1272,13 +1324,14 @@ def etl_process():
         # Remover arquivos após a inserção no banco
         shutil.rmtree(OUTPUT_FILES_PATH)
         shutil.rmtree(EXTRACTED_FILES_PATH)
-        logging.info("Arquivos removidos após a carga no banco.")
+        logger.info("Arquivos removidos após a carga no banco.")
 
-        total_time = time.time() - start_time
-        logging.info(f"ETL concluído com sucesso em {total_time:.2f} segundos!")
+        logger.info(f"ETL concluído com sucesso em {converter_segundos(start_time, datetime.now())}")
 
     except Exception as e:
-        logging.error(f"Erro no processo ETL: {e}", exc_info=True)
+        logger.error(f"Erro no processo ETL: {e}", exc_info=True)
+        logger.critical("Não foi possível iniciar o aplicativo")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
