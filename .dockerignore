@@ -17,7 +17,6 @@ tmp/
 *.rar
 *.7z
 *.tar.gz
-*.txt
 *.csv
 
 # (Use somente se você armazena arquivos enormes)
@@ -26,9 +25,6 @@ tmp/
 # ===============================
 # IGNORAR AMBIENTES E BUILD
 # ===============================
-.dockerignore
-Dockerfile
-docker-compose.yml
 .env
 dados_rfb_env/
 __pycache__/
@@ -54,10 +50,3 @@ __pycache__/
 venv/
 env/
 .venv/
-
-# ===============================
-# Arquivos do host que não devem ser copiados
-# ===============================
-*.md
-README*
-LICENSE
