@@ -189,6 +189,10 @@ docker exec -d dados_rfb-etl python etl_rfb_dados.py --etl
 
 docker exec dados_rfb-etl cat /code/logs/etl_rfb_dados_log.txt
 
+ou tem tempor real
+
+docker exec dados_rfb-etl tail -f /code/logs/etl_rfb_dados_log.txt
+
 # Acessar o container para debug
 
 docker exec -it dados_rfb-etl bash

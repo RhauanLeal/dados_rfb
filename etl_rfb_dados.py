@@ -42,6 +42,10 @@ OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
 EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
 
+# Tamanho padrão de chunk para leitura dos arquivos grandes
+CHUNK_ROWS=100_000  # 100 mil linhas por chunk (leitura)
+CHUNK_TO_SQL=5_000  # 5 mil linhas por insert no to_sql (insert)
+
 logger.info("Iniciando ETL - dados_rfb")
 
 # carrega o arquivo de configuração .env
@@ -134,9 +138,12 @@ def connect_db(autocommit=False):
     if not all([user, host, database]):
         logger.error("Erro: variáveis de ambiente DB_* incompletas no .env")
         missing = []
-        if not user: missing.append("DB_USER")
-        if not host: missing.append("DB_HOST") 
-        if not database: missing.append("DB_NAME")
+        if not user:
+            missing.append("DB_USER")
+        if not host:
+            missing.append("DB_HOST") 
+        if not database:
+            missing.append("DB_NAME")
         logger.error(f"Variáveis faltando: {', '.join(missing)}")
         raise ValueError(f"Configuração do banco incompleta. Variáveis faltando: {', '.join(missing)}")
 
@@ -305,6 +312,7 @@ def criar_tabela_info_dados():
         conn.commit()
         logger.info("Tabelas info_dados e estruturas criadas/verificadas com sucesso!")
     conn.close()
+    return True
 
 
 # Cria as tabelas no banco de dados se elas não existirem.
@@ -754,7 +762,9 @@ def etl_process():
                                                     header=None,
                                                     dtype=empresa_dtypes,
                                                     encoding='latin-1',
-                                                    chunksize=2_000_000)):
+                                                    chunksize=CHUNK_ROWS,
+                                                    low_memory=True
+                                                    )):
 
                     chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
 
@@ -767,7 +777,14 @@ def etl_process():
                     chunk['capital_social'] = chunk['capital_social'].apply(tratar_capital)
                     
                     try:
-                        chunk.to_sql(name='empresa', con=engine, if_exists='append', index=False, chunksize=10_000)
+                        chunk.to_sql(
+                            name='empresa', 
+                            con=engine, 
+                            if_exists='append', 
+                            index=False, 
+                            chunksize=CHUNK_TO_SQL,
+                            method='multi'
+                            )
                         logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso!")
                     except Exception as e:
                         logger.error(f"Erro ao inserir chunk {i} do arquivo {arquivo}: {e}")
@@ -781,7 +798,8 @@ def etl_process():
                                 con=engine,
                                 if_exists='append',
                                 index=False,
-                                chunksize=10_000
+                                chunksize=CHUNK_TO_SQL,
+                                method='multi'
                             )
                             logger.info(f"Chunk {i} reprocessado com sucesso!")
                         except Exception as segunda_falha:
@@ -799,8 +817,24 @@ def etl_process():
                 gc.collect()
 
         logger.info("Arquivos de empresa finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
 
-        # Começa arquivos_estabelecimento
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
+
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "estabelecimento" ;')
         conn.commit()
@@ -827,7 +861,8 @@ def etl_process():
                     header=None,
                     dtype=estabelecimento_dtypes,
                     encoding='latin-1',
-                    chunksize=2_000_000
+                    chunksize=CHUNK_ROWS,
+                    low_memory=True
                 )):
 
                     chunk.columns = [
@@ -846,7 +881,8 @@ def etl_process():
                         con=engine,
                         if_exists='append',
                         index=False,
-                        chunksize=10_000
+                        chunksize=CHUNK_TO_SQL,
+                        method='multi'
                     )
 
                     logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
@@ -861,8 +897,24 @@ def etl_process():
                 gc.collect()
 
         logger.info("Arquivos de estabelecimento finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
 
-        # Arquivos de socios:
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
+
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "socios" ;')
         conn.commit()
@@ -887,7 +939,8 @@ def etl_process():
                     header=None,
                     dtype=socios_dtypes,
                     encoding='latin-1',
-                    chunksize=2_000_000
+                    chunksize=CHUNK_ROWS,
+                    low_memory=True
                 )):
                     # Renomear colunas
                     chunk.columns = [
@@ -910,7 +963,8 @@ def etl_process():
                         con=engine,
                         if_exists='append',
                         index=False,
-                        chunksize=10_000
+                        chunksize=CHUNK_TO_SQL,
+                        method='multi'
                     )
 
                     logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
@@ -926,8 +980,24 @@ def etl_process():
                 gc.collect()
 
         logger.info("Arquivos de socios finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
 
-        # Arquivos de simples:
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
+
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "simples" ;')
         conn.commit()
@@ -956,7 +1026,8 @@ def etl_process():
                     header=None,
                     dtype=simples_dtypes,
                     encoding='latin-1',
-                    chunksize=2_000_000
+                    chunksize=CHUNK_ROWS,
+                    low_memory=True
                 )):
                     # Renomear colunas
                     chunk.columns = [
@@ -975,7 +1046,8 @@ def etl_process():
                         con=engine,
                         if_exists='append',
                         index=False,
-                        chunksize=10_000
+                        chunksize=CHUNK_TO_SQL,
+                        method='multi'
                     )
 
                     logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
@@ -984,14 +1056,31 @@ def etl_process():
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
+
             finally:
                 if 'chunk' in locals():
                     del chunk
                 gc.collect()
 
         logger.info("Arquivos do simples finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
 
-        # Arquivos de cnae:
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
+
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "cnae" ;')
         conn.commit()
@@ -1021,7 +1110,8 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=10_000
+                    chunksize=CHUNK_TO_SQL,
+                    method='multi'
                 )
 
                 logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
@@ -1030,14 +1120,31 @@ def etl_process():
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
+
             finally:
                 if 'cnae' in locals():
                     del cnae
                 gc.collect()
 
         logger.info("Arquivos de cnae finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
 
-        # Arquivos de moti:
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
+
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "moti" ;')
         conn.commit()
@@ -1072,7 +1179,8 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=10_000
+                    chunksize=CHUNK_TO_SQL,
+                    method='multi'
                 )
 
                 logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
@@ -1081,12 +1189,30 @@ def etl_process():
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
+
             finally:
                 if 'moti' in locals():
                     del moti
                 gc.collect()
 
         logger.info("Arquivos de moti finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
+
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
 
         # Arquivos de munic:
         # Drop table antes do insert
@@ -1123,7 +1249,8 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=10_000
+                    chunksize=CHUNK_TO_SQL,
+                    method='multi'
                 )
 
                 logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
@@ -1132,12 +1259,30 @@ def etl_process():
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
+
             finally:
                 if 'munic' in locals():
                     del munic
                 gc.collect()
 
         logger.info("Arquivos de munic finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
+
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
 
         # Arquivos de natju:
         # Drop table antes do insert
@@ -1174,7 +1319,8 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=10_000
+                    chunksize=CHUNK_TO_SQL,
+                    method='multi'
                 )
 
                 logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
@@ -1183,12 +1329,30 @@ def etl_process():
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
+
             finally:
                 if 'natju' in locals():
                     del natju
                 gc.collect()
 
         logger.info("Arquivos de natju finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
+
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
 
         # Arquivos de pais:
         # Drop table antes do insert
@@ -1225,7 +1389,8 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=10_000
+                    chunksize=CHUNK_TO_SQL,
+                    method='multi'
                 )
 
                 logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
@@ -1234,12 +1399,30 @@ def etl_process():
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
+
             finally:
                 if 'pais' in locals():
                     del pais
                 gc.collect()
 
         logger.info("Arquivos de pais finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
+
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
+
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
 
         # Arquivos de qualificação de sócios:
         # Drop table antes do insert
@@ -1276,7 +1459,8 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=10_000
+                    chunksize=CHUNK_TO_SQL,
+                    method='multi'
                 )
 
                 logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
@@ -1285,29 +1469,45 @@ def etl_process():
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
+
             finally:
                 if 'quals' in locals():
                     del quals
                 gc.collect()
+        
+        logger.info("Arquivos de quals finalizados!")
+        # Fecha cursor
+        try:
+            cur.close()
+        except:
+            pass
+
+        # Fecha engine e libera RAM
+        try:
+            engine.dispose()
+        except:
+            pass
+
+        gc.collect()
 
         # Grava os dados e gera um txt com os arquivos com erro
         if arquivos_com_erro:
             logger.warning(f"Arquivos com erro: {arquivos_com_erro}")
-            
+            logger.warning(f"Arquivos com erro foram movidos para: {ERRO_FILES_PATH}")
+           
             with open("arquivos_com_erro.txt", "w", encoding="utf-8") as f:
                 for nome in arquivos_com_erro:
                     f.write(nome + "\n")
-            for arquivo in arquivos_com_erro:
-                # Move os arquivos com erro para uma subpasta chamada erro/ para facilitar o controle:
-                shutil.move(extracted_file_path, ERRO_FILES_PATH / arquivo)
+        
+        # Reabre conexão para próximo bloco
+        conn, engine = connect_db()
+        cur = conn.cursor()
 
         # Inserir os dados da ultima atualização na tabela info_dados
         inserir_info_dados(conn, info)
 
         cur.close() # Fecha a conexão com o banco
         conn.close() # Fecha a conexão com o banco
-
-        logger.info("Arquivos de quals finalizados!")
 
         # Processo de inserção finalizado
         logger.info('Processo de carga dos arquivos finalizado!')
