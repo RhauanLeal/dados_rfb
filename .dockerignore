@@ -18,6 +18,7 @@ tmp/
 *.7z
 *.tar.gz
 *.csv
+*.bkp
 
 # (Use somente se você armazena arquivos enormes)
 *.json
