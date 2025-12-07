@@ -19,10 +19,6 @@ from datetime import datetime
 LOG_DIR = pathlib.Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
-
-# Debug: ver todos os loggers configurados
-print("Loggers antes da configuração:", logging.Logger.manager.loggerDict.keys())
-
 # Criar arquivo de log com codificação UTF-8
 log_file = LOG_DIR / "etl_rfb_dados_log.txt"
 
@@ -36,8 +32,6 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-
-logger = logging.getLogger(__name__)
 
 # Verificar se configurou corretamente
 logger = logging.getLogger(__name__)
