@@ -1,0 +1,63 @@
+# ===============================
+# IGNORAR DIRETÓRIOS DE DADOS
+# ===============================
+files_extracted/
+files_downloaded/
+files_error/
+erro/
+logs/
+output/
+temp/
+tmp/
+
+# ===============================
+# IGNORAR ARQUIVOS GIGANTES
+# ===============================
+*.zip
+*.rar
+*.7z
+*.tar.gz
+*.txt
+*.csv
+
+# (Use somente se você armazena arquivos enormes)
+*.json
+
+# ===============================
+# IGNORAR AMBIENTES E BUILD
+# ===============================
+.dockerignore
+Dockerfile
+docker-compose.yml
+.env
+dados_rfb_env/
+__pycache__/
+*.pyc
+*.pyo
+
+# ===============================
+# IGNORAR DIRETÓRIOS DE DESENVOLVIMENTO
+# ===============================
+.vscode/
+.idea/
+*.log
+
+# ===============================
+# GIT
+# ===============================
+.git/
+.gitignore
+
+# ===============================
+# PYTHON VENV
+# ===============================
+venv/
+env/
+.venv/
+
+# ===============================
+# Arquivos do host que não devem ser copiados
+# ===============================
+*.md
+README*
+LICENSE
