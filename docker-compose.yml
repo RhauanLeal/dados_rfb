@@ -20,6 +20,8 @@ services:
       retries: 3
     networks:
       - snfisc-network
+    mem_limit: 3g
+    mem_reservation: 2g
 
 networks:
   snfisc-network:
