@@ -531,91 +531,94 @@ def create_base_tables(conn):
     logger.info("Tabelas recriadas com sucesso (info_dados preservado).")
 
 
+def stream_file_lines(path):
+    """Gera linhas decodificadas e sem NULL bytes para COPY."""
+    with open(path, "rb") as f:
+        for line in f:
+            # Limpa null bytes e decodifica
+            yield line.replace(b"\x00", b"").decode("latin-1", errors="replace")
+
+
 def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
     if not arquivos_empresa:
         logger.info("Nenhum arquivo EMPRE encontrado para carga.")
         return
 
-    logger.info("==== Iniciando carga EMPRESA (COPY + transformação capital_social) ====")
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-        CREATE TEMP TABLE empresa_tmp (
-            cnpj_basico TEXT,
-            razao_social TEXT,
-            natureza_juridica TEXT,
-            qualificacao_responsavel TEXT,
-            capital_social_raw TEXT,
-            porte_empresa TEXT,
-            ente_federativo_responsavel TEXT
-        );
-        """
-        )
-        conn.commit()
+    logger.info("==== Iniciando carga EMPRESA (STREAMING COPY) ====")
 
-        copy_sql = """
-            COPY empresa_tmp
-            FROM STDIN
-            WITH (FORMAT csv, DELIMITER ';', QUOTE '"', ESCAPE '"', NULL '');
-        """
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TEMP TABLE empresa_tmp (
+                cnpj_basico TEXT,
+                razao_social TEXT,
+                natureza_juridica TEXT,
+                qualificacao_responsavel TEXT,
+                capital_social_raw TEXT,
+                porte_empresa TEXT,
+                ente_federativo_responsavel TEXT
+            );
+        """)
+        conn.commit()
 
         for arquivo in arquivos_empresa:
             caminho = EXTRACTED_FILES_PATH / arquivo
-            if not caminho.exists():
-                logger.warning(f"Arquivo EMPRE não encontrado: {caminho}")
-                continue
+            logger.info(f"EMPRESA - carregando (streaming): {arquivo}")
 
-            logger.info(f"EMPRESA - COPY para empresa_tmp: {arquivo}")
             try:
-                cur.execute("TRUNCATE TABLE empresa_tmp;")
+                cur.execute("TRUNCATE empresa_tmp;")
 
-                # LEITURA SEGURO SEM NULL BYTE
+                # COPY usando streaming linha a linha
                 with open(caminho, "rb") as f:
-                    raw = f.read().replace(b"\x00", b"")
+                    cur.copy_from(
+                        io.TextIOWrapper(
+                            f,
+                            encoding="latin-1",
+                            errors="replace",
+                            newline="",
+                        ),
+                        "empresa_tmp",
+                        sep=';',
+                        null=""
+                    )
 
-                texto = raw.decode("latin-1", errors="replace")
-
-                cur.copy_expert(copy_sql, io.StringIO(texto))
-
-                cur.execute(
-                    """
-                INSERT INTO empresa (
-                    cnpj_basico,
-                    razao_social,
-                    natureza_juridica,
-                    qualificacao_responsavel,
-                    capital_social,
-                    porte_empresa,
-                    ente_federativo_responsavel
-                )
-                SELECT
-                    cnpj_basico,
-                    razao_social,
-                    natureza_juridica,
-                    qualificacao_responsavel,
-                    CASE
-                        WHEN capital_social_raw IS NULL OR capital_social_raw = '' THEN 0.0
-                        ELSE REPLACE(capital_social_raw, ',', '.')::DOUBLE PRECISION
-                    END AS capital_social,
-                    porte_empresa,
-                    ente_federativo_responsavel
-                FROM empresa_tmp;
-                """
-                )
+                # Inserção com conversão do capital_social
+                cur.execute("""
+                    INSERT INTO empresa (
+                        cnpj_basico,
+                        razao_social,
+                        natureza_juridica,
+                        qualificacao_responsavel,
+                        capital_social,
+                        porte_empresa,
+                        ente_federativo_responsavel
+                    )
+                    SELECT
+                        cnpj_basico,
+                        razao_social,
+                        natureza_juridica,
+                        qualificacao_responsavel,
+                        CASE
+                            WHEN capital_social_raw IS NULL OR capital_social_raw = ''
+                                THEN 0.0
+                            ELSE REPLACE(capital_social_raw, ',', '.')::DOUBLE PRECISION
+                        END,
+                        porte_empresa,
+                        ente_federativo_responsavel
+                    FROM empresa_tmp;
+                """)
 
                 conn.commit()
                 logger.info(f"EMPRESA - arquivo {arquivo} carregado com sucesso.")
+
             except Exception as e:
                 conn.rollback()
-                logger.error(f"Erro ao processar arquivo EMPRE {arquivo}: {e}", exc_info=True)
+                logger.error(f"Erro ao processar EMPRESA {arquivo}: {e}", exc_info=True)
                 arquivos_com_erro.append(arquivo)
                 move_file_error(caminho, arquivo)
 
-        try:
-            cur.execute("DROP TABLE IF EXISTS empresa_tmp;")
-            conn.commit()
-        except Exception:
-            conn.rollback()
+        cur.execute("DROP TABLE IF EXISTS empresa_tmp;")
+        conn.commit()
+
     logger.info("==== Carga EMPRESA finalizada ====")
 
 
@@ -624,7 +627,8 @@ def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arq
         logger.info(f"Nenhum arquivo {log_label} encontrado para carga.")
         return
 
-    logger.info(f"==== Iniciando carga {log_label} (COPY) ====")
+    logger.info(f"==== Iniciando carga {log_label} (STREAMING COPY) ====")
+
     cols_def = ", ".join(f"{c} TEXT" for c in columns)
     col_list = ", ".join(columns)
 
@@ -632,53 +636,42 @@ def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arq
         cur.execute(f"CREATE TEMP TABLE {temp_table_name} ({cols_def});")
         conn.commit()
 
-        copy_sql = f"""
-            COPY {temp_table_name}
-            FROM STDIN
-            WITH (FORMAT csv, DELIMITER ';', QUOTE '"', ESCAPE '"', NULL '');
-        """
-
         for arquivo in arquivos:
             caminho = EXTRACTED_FILES_PATH / arquivo
-            if not caminho.exists():
-                logger.warning(f"Arquivo {log_label} não encontrado: {caminho}")
-                continue
+            logger.info(f"{log_label} - carregando (streaming): {arquivo}")
 
-            logger.info(f"{log_label} - COPY para {temp_table_name}: {arquivo}")
             try:
-                cur.execute(f"TRUNCATE TABLE {temp_table_name};")
-                
-                # LEITURA SEGURO SEM NULL BYTE
+                cur.execute(f"TRUNCATE {temp_table_name};")
+
+                # COPY direto com streaming, sem buffer gigante
                 with open(caminho, "rb") as f:
-                    raw = f.read().replace(b"\x00", b"")
-
-                texto = raw.decode("latin-1", errors="replace")
-
-                cur.copy_expert(copy_sql, io.StringIO(texto))
+                    cur.copy_from(
+                        io.TextIOWrapper(
+                            f,
+                            encoding="latin-1",
+                            errors="replace",
+                            newline=""
+                        ),
+                        temp_table_name,
+                        sep=';',
+                        null=""
+                    )
 
                 cur.execute(
-                    f"""
-                INSERT INTO {table_name} ({col_list})
-                SELECT {col_list}
-                FROM {temp_table_name};
-                """
+                    f"INSERT INTO {table_name} ({col_list}) SELECT {col_list} FROM {temp_table_name};"
                 )
+
                 conn.commit()
                 logger.info(f"{log_label} - arquivo {arquivo} carregado com sucesso.")
+
             except Exception as e:
                 conn.rollback()
-                logger.error(
-                    f"Erro ao processar arquivo {log_label} {arquivo}: {e}",
-                    exc_info=True,
-                )
+                logger.error(f"Erro ao processar {log_label} {arquivo}: {e}", exc_info=True)
                 arquivos_com_erro.append(arquivo)
                 move_file_error(caminho, arquivo)
 
-        try:
-            cur.execute(f"DROP TABLE IF EXISTS {temp_table_name};")
-            conn.commit()
-        except Exception:
-            conn.rollback()
+        cur.execute(f"DROP TABLE IF EXISTS {temp_table_name};")
+        conn.commit()
 
     logger.info(f"==== Carga {log_label} finalizada ====")
 
