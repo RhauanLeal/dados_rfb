@@ -9,18 +9,19 @@ import zipfile
 import pathlib
 import gc
 import psycopg2
-from psycopg2 import sql
 from dotenv import load_dotenv, find_dotenv
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-# =========================
-# CONFIGURAÇÃO DE LOG
-# =========================
+# Diretórios fixos para armazenar os arquivos
 BASE_DIR = pathlib.Path().resolve()
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
+EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
+ERRO_FILES_PATH = BASE_DIR / "files_error"
 
+# Garantir diretório de logs
+LOG_DIR = pathlib.Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
 log_file = LOG_DIR / "etl_rfb_dados_log.txt"
 
 logging.basicConfig(
@@ -32,19 +33,11 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
-
 logger = logging.getLogger(__name__)
 
-# Diretórios fixos para armazenar os arquivos
-OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
-EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
-ERRO_FILES_PATH = BASE_DIR / "files_error"
+logger.info("Iniciando ETL - dados_rfb (versão COPY / TEMP TABLE)")
 
-logger.info("Iniciando ETL - dados_rfb (COPY)")
-
-# =========================
-# CARREGAR .env
-# =========================
+# Caminho do .env (fora do projeto, para uso com Docker)
 ENV_PATH_PARENT = BASE_DIR.parent / "dados_rfb_env" / ".env"
 ENV_PATH_LOCAL = BASE_DIR / ".env"
 
@@ -55,19 +48,13 @@ else:
 
 if not dotenv_path:
     logger.error("Arquivo de configuração .env não encontrado.")
-    logger.info("ETL Finalizado.")
+    logger.info("ETL finalizado.")
     sys.exit(1)
 
 load_dotenv(dotenv_path)
 
 
-# =========================
-# FUNÇÕES UTILITÁRIAS
-# =========================
 def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
-    """
-    Converte diferença entre dois datetimes em texto "X horas, Y minutos, Z segundos"
-    """
     diferenca = tempo_final - tempo_inicial
     total_segundos = int(diferenca.total_seconds())
 
@@ -75,32 +62,30 @@ def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
     minutos = (total_segundos % 3600) // 60
     segundos = total_segundos % 60
 
-    componentes = []
-
+    partes = []
     if horas == 1:
-        componentes.append("1 hora")
+        partes.append("1 hora")
     elif horas > 1:
-        componentes.append(f"{horas} horas")
+        partes.append(f"{horas} horas")
 
     if minutos == 1:
-        componentes.append("1 minuto")
+        partes.append("1 minuto")
     elif minutos > 1:
-        componentes.append(f"{minutos} minutos")
+        partes.append(f"{minutos} minutos")
 
     if segundos == 1:
-        componentes.append("1 segundo")
+        partes.append("1 segundo")
     elif segundos > 1:
-        componentes.append(f"{segundos} segundos")
-    elif segundos < 1:
-        componentes.append(f"{diferenca} segundos")
+        partes.append(f"{segundos} segundos")
+    elif segundos == 0 and not partes:
+        partes.append(f"{diferenca} segundos")
 
-    return ", ".join(componentes)
+    return ", ".join(partes)
 
 
 def connect_db(autocommit: bool = False):
-    """
-    Cria conexão com o PostgreSQL usando variáveis do .env
-    """
+    from urllib.parse import quote_plus
+
     user = os.getenv("DB_USER")
     passw = os.getenv("DB_PASSWORD")
     host = os.getenv("DB_HOST")
@@ -108,7 +93,7 @@ def connect_db(autocommit: bool = False):
     database = os.getenv("DB_NAME")
 
     if passw is None or passw.strip() == "":
-        logger.warning("⚠️ DB_PASSWORD está vazio no .env")
+        logger.warning("⚠️ DB_PASSWORD em branco ou não configurado no .env")
 
     if not all([user, host, database]):
         missing = []
@@ -118,178 +103,148 @@ def connect_db(autocommit: bool = False):
             missing.append("DB_HOST")
         if not database:
             missing.append("DB_NAME")
-        logger.error(f"Variáveis faltando no .env: {', '.join(missing)}")
+        logger.error(f"Variáveis de ambiente faltando: {', '.join(missing)}")
         raise ValueError(f"Configuração do banco incompleta: {', '.join(missing)}")
 
-    dsn = f"dbname={database} user={user} password={passw} host={host} port={port}"
+    user_escaped = quote_plus(user)
+    passw_escaped = quote_plus(passw) if passw else ""
+
+    conn_str_safe = f"postgresql://{user_escaped}:{passw_escaped}@{host}:{port}/{database}"
 
     try:
-        conn = psycopg2.connect(dsn)
+        conn = psycopg2.connect(conn_str_safe)
         if autocommit:
             conn.set_session(autocommit=True)
         logger.info("✅ Conectado ao banco.")
         return conn
     except Exception as e:
-        logger.error(f"❌ Erro na conexão com o banco: {e}")
+        logger.error(f"❌ Erro ao conectar no banco: {e}")
         raise
 
 
-# =========================
-# INFO_DADOS (controle de versão)
-# =========================
 def criar_tabela_info_dados():
-    """
-    Cria tabela info_dados para controlar a versão mais recente dos dados RFB.
-    """
     conn = connect_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS info_dados (
-                    id SERIAL PRIMARY KEY,
-                    ano INTEGER NOT NULL,
-                    mes INTEGER NOT NULL,
-                    data_atualizacao TIMESTAMP WITHOUT TIME ZONE NOT NULL,
-                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (ano, mes)
-                );
-                """
+            CREATE TABLE IF NOT EXISTS info_dados (
+                id SERIAL PRIMARY KEY,
+                ano INTEGER NOT NULL,
+                mes INTEGER NOT NULL,
+                data_atualizacao TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (ano, mes)
+            );
+            """
             )
 
             cur.execute(
                 """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        WHERE c.relname = 'idx_info_dados_data_atualizacao'
-                        AND n.nspname = 'public'
-                    ) THEN
-                        CREATE INDEX idx_info_dados_data_atualizacao ON info_dados (data_atualizacao);
-                    END IF;
-                END$$;
-                """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relname = 'idx_info_dados_data_atualizacao'
+                      AND n.nspname = 'public'
+                ) THEN
+                    CREATE INDEX idx_info_dados_data_atualizacao
+                    ON info_dados (data_atualizacao);
+                END IF;
+            END$$;
+            """
             )
 
             cur.execute(
                 """
-                CREATE OR REPLACE FUNCTION atualiza_updated_at()
-                RETURNS TRIGGER AS $$
-                BEGIN
-                    NEW.updated_at = CURRENT_TIMESTAMP;
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql;
-                """
+            CREATE OR REPLACE FUNCTION atualiza_updated_at()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                NEW.updated_at = CURRENT_TIMESTAMP;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            """
             )
 
             cur.execute(
                 """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_trigger WHERE tgname = 'trg_atualiza_updated_at'
-                    ) THEN
-                        CREATE TRIGGER trg_atualiza_updated_at
-                        BEFORE UPDATE ON info_dados
-                        FOR EACH ROW
-                        EXECUTE FUNCTION atualiza_updated_at();
-                    END IF;
-                END$$;
-                """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger WHERE tgname = 'trg_atualiza_updated_at'
+                ) THEN
+                    CREATE TRIGGER trg_atualiza_updated_at
+                    BEFORE UPDATE ON info_dados
+                    FOR EACH ROW
+                    EXECUTE FUNCTION atualiza_updated_at();
+                END IF;
+            END$$;
+            """
             )
 
         conn.commit()
-        logger.info("Tabela info_dados criada/verificada com sucesso.")
-    finally:
-        conn.close()
-
-
-def inserir_info_dados(info: dict):
-    """
-    Insere ou atualiza info_dados com a versão mais recente.
-    """
-    conn = connect_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO info_dados (ano, mes, data_atualizacao)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (ano, mes)
-                DO UPDATE SET data_atualizacao = EXCLUDED.data_atualizacao;
-                """,
-                (info["ano"], info["mes"], info["data_atualizacao"]),
-            )
-        conn.commit()
-        logger.info(
-            f"Atualização registrada em info_dados: {info['ano']}-{info['mes']:02d}"
-        )
+        logger.info("Tabela info_dados verificada/criada com sucesso.")
     finally:
         conn.close()
 
 
 def verificar_nova_atualizacao():
-    """
-    Verifica no site da RFB qual é a pasta ano-mês mais recente.
-    Compara com info_dados; se já tiver, retorna None.
-    Caso contrário, retorna dict com ano, mes, data_atualizacao, url.
-    """
     base_url = "https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/"
-    response = requests.get(base_url)
-
-    if response.status_code != 200:
-        logger.error(f"Erro ao acessar {base_url}: código {response.status_code}")
+    resp = requests.get(base_url)
+    if resp.status_code != 200:
+        logger.error(f"Erro ao acessar {base_url}: {resp.status_code}")
         return None
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(resp.text, "html.parser")
     datas = []
 
     for tr in soup.find_all("tr"):
         tds = tr.find_all("td")
-        if len(tds) >= 3:
-            a_tag = tds[1].find("a")
-            data_txt = tds[2].text.strip()
-            if a_tag and data_txt:
-                href = a_tag.get("href")
-                if href and href.endswith("/") and len(href.rstrip("/")) == 7:
-                    ano_mes = href.rstrip("/")
-                    try:
-                        data_atualizacao = datetime.strptime(data_txt, "%Y-%m-%d %H:%M")
-                        datas.append((ano_mes, data_atualizacao))
-                    except Exception:
-                        continue
+        if len(tds) < 3:
+            continue
+        a_tag = tds[1].find("a")
+        data_txt = tds[2].get_text(strip=True)
+        if not a_tag or not data_txt:
+            continue
+        href = a_tag.get("href")
+        if not href or not href.endswith("/"):
+            continue
+        pasta = href.rstrip("/")
+        if len(pasta) != 7:  # "YYYY-MM"
+            continue
+        try:
+            dt = datetime.strptime(data_txt, "%Y-%m-%d %H:%M")
+            datas.append((pasta, dt))
+        except Exception:
+            continue
 
     if not datas:
         logger.info("Nenhuma pasta válida encontrada no site da RFB.")
         return None
 
-    # Pasta mais recente
-    ano_mes, data_atualizacao = max(datas, key=lambda x: x[1])
-    ano, mes = map(int, ano_mes.split("-"))
+    pasta_recente, dt_recente = max(datas, key=lambda x: x[1])
+    ano, mes = map(int, pasta_recente.split("-"))
 
-    # Garante info_dados
     criar_tabela_info_dados()
-
-    # Verifica se já existe essa versão
     conn = connect_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT 1 FROM info_dados
-                WHERE ano = %s AND mes = %s AND data_atualizacao = %s
-                LIMIT 1;
-                """,
-                (ano, mes, data_atualizacao),
+            SELECT 1
+            FROM info_dados
+            WHERE ano = %s AND mes = %s AND data_atualizacao = %s
+            LIMIT 1;
+            """,
+                (ano, mes, dt_recente),
             )
-            existe = cur.fetchone()
-        if existe:
+            row = cur.fetchone()
+        if row:
             logger.info(
-                f"A versão {ano}-{mes:02d} já está registrada em info_dados. Nada a fazer."
+                f"Versão mais recente ({pasta_recente}, {dt_recente}) já registrada em info_dados."
             )
             return None
     finally:
@@ -298,264 +253,10 @@ def verificar_nova_atualizacao():
     return {
         "ano": ano,
         "mes": mes,
-        "data_atualizacao": data_atualizacao,
-        "url": f"{base_url}{ano}-{mes:02d}/",
+        "data_atualizacao": dt_recente,
+        "url": f"{base_url}{pasta_recente}/",
     }
 
-
-# =========================
-# CRIAÇÃO DAS TABELAS
-# =========================
-def create_tables():
-    """
-    Cria todas as tabelas necessárias do layout oficial
-    (sempre garantindo estrutura correta antes do carregamento).
-    """
-    conn = connect_db()
-    try:
-        with conn.cursor() as cur:
-            # Drop + create para garantir esquema consistente
-            cur.execute("DROP TABLE IF EXISTS cnae, empresa, empresa_porte, estabelecimento, estabelecimento_situacao_cadastral, moti, munic, natju, pais, quals, simples, socios, socios_identificador CASCADE;")
-
-            # cnae
-            cur.execute(
-                """
-                CREATE TABLE public.cnae (
-                    codigo TEXT PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # empresa (capital_social NUMERIC, pois vem com vírgula)
-            cur.execute(
-                """
-                CREATE TABLE public.empresa (
-                    cnpj_basico TEXT PRIMARY KEY,
-                    razao_social TEXT,
-                    natureza_juridica TEXT,
-                    qualificacao_responsavel TEXT,
-                    capital_social NUMERIC(18,2),
-                    porte_empresa TEXT,
-                    ente_federativo_responsavel TEXT
-                );
-                """
-            )
-
-            # empresa_porte (tabela estática)
-            cur.execute(
-                """
-                CREATE TABLE empresa_porte (
-                    codigo INTEGER PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # estabelecimento
-            cur.execute(
-                """
-                CREATE TABLE public.estabelecimento (
-                    cnpj_basico TEXT,
-                    cnpj_ordem TEXT,
-                    cnpj_dv TEXT,
-                    identificador_matriz_filial TEXT,
-                    nome_fantasia TEXT,
-                    situacao_cadastral TEXT,
-                    data_situacao_cadastral TEXT,
-                    motivo_situacao_cadastral TEXT,
-                    nome_cidade_exterior TEXT,
-                    pais TEXT,
-                    data_inicio_atividade TEXT,
-                    cnae_fiscal_principal TEXT,
-                    cnae_fiscal_secundaria TEXT,
-                    tipo_logradouro TEXT,
-                    logradouro TEXT,
-                    numero TEXT,
-                    complemento TEXT,
-                    bairro TEXT,
-                    cep TEXT,
-                    uf TEXT,
-                    municipio TEXT,
-                    ddd_1 TEXT,
-                    telefone_1 TEXT,
-                    ddd_2 TEXT,
-                    telefone_2 TEXT,
-                    ddd_fax TEXT,
-                    fax TEXT,
-                    correio_eletronico TEXT,
-                    situacao_especial TEXT,
-                    data_situacao_especial TEXT,
-                    PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
-                );
-                """
-            )
-
-            # estabelecimento_situacao_cadastral (tabela estática)
-            cur.execute(
-                """
-                CREATE TABLE estabelecimento_situacao_cadastral (
-                    codigo INTEGER PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # moti
-            cur.execute(
-                """
-                CREATE TABLE public.moti (
-                    codigo TEXT PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # munic
-            cur.execute(
-                """
-                CREATE TABLE public.munic (
-                    codigo TEXT PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # natju
-            cur.execute(
-                """
-                CREATE TABLE public.natju (
-                    codigo TEXT PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # pais
-            cur.execute(
-                """
-                CREATE TABLE public.pais (
-                    codigo TEXT PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # quals
-            cur.execute(
-                """
-                CREATE TABLE public.quals (
-                    codigo TEXT PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # simples
-            cur.execute(
-                """
-                CREATE TABLE public.simples (
-                    cnpj_basico TEXT PRIMARY KEY,
-                    opcao_pelo_simples TEXT,
-                    data_opcao_simples TEXT,
-                    data_exclusao_simples TEXT,
-                    opcao_mei TEXT,
-                    data_opcao_mei TEXT,
-                    data_exclusao_mei TEXT
-                );
-                """
-            )
-
-            # socios
-            cur.execute(
-                """
-                CREATE TABLE public.socios (
-                    cnpj_basico TEXT,
-                    identificador_socio TEXT,
-                    nome_socio_razao_social TEXT,
-                    cpf_cnpj_socio TEXT,
-                    qualificacao_socio TEXT,
-                    data_entrada_sociedade TEXT,
-                    pais TEXT,
-                    representante_legal TEXT,
-                    nome_do_representante TEXT,
-                    qualificacao_representante_legal TEXT,
-                    faixa_etaria TEXT
-                );
-                """
-            )
-
-            # socios_identificador (estático)
-            cur.execute(
-                """
-                CREATE TABLE socios_identificador (
-                    codigo INTEGER PRIMARY KEY,
-                    descricao TEXT
-                );
-                """
-            )
-
-            # Inserts estáticos
-            cur.execute(
-                """
-                INSERT INTO empresa_porte (codigo, descricao) VALUES
-                    (1, 'Microempresa'),
-                    (3, 'Empresa de Pequeno Porte'),
-                    (5, 'Demais')
-                ON CONFLICT (codigo) DO NOTHING;
-                """
-            )
-
-            cur.execute(
-                """
-                INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES
-                    (1, 'Nula'),
-                    (2, 'Ativa'),
-                    (3, 'Suspensa'),
-                    (4, 'Inapta'),
-                    (5, 'Ativa Não Regular'),
-                    (8, 'Baixada')
-                ON CONFLICT (codigo) DO NOTHING;
-                """
-            )
-
-            cur.execute(
-                """
-                INSERT INTO socios_identificador (codigo, descricao) VALUES
-                    (1, 'Pessoa Jurídica'),
-                    (2, 'Pessoa Física'),
-                    (3, 'Sócio Estrangeiro')
-                ON CONFLICT (codigo) DO NOTHING;
-                """
-            )
-
-        conn.commit()
-        logger.info("Tabelas criadas/recriadas com sucesso.")
-    finally:
-        conn.close()
-
-
-# =========================
-# DOWNLOAD E EXTRAÇÃO
-# =========================
-# Função para verificar se o arquivo já foi baixado e se é necessário atualizar
-def check_diff(url, file_name):
-    if not os.path.isfile(file_name):
-        return True
-
-    try:
-        response = requests.head(url, timeout=10)
-        new_size = int(response.headers.get("content-length", 0))
-    except Exception as e:
-        logger.warning(f"Erro ao verificar cabeçalho de {url}: {e}")
-        return True
-
-    old_size = os.path.getsize(file_name)
-    if new_size != old_size:
-        os.remove(file_name)
-        return True
-
-    return False
 
 def get_files(base_url: str):
     resp = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -565,110 +266,352 @@ def get_files(base_url: str):
 
     soup = BeautifulSoup(resp.text, "html.parser")
     files = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".zip")]
-    files = sorted(files)
-    logger.info(f"Arquivos .zip encontrados ({len(files)}): {files}")
-    return files
+    if not files:
+        logger.info("Nenhum arquivo .zip encontrado no diretório remoto.")
+        return []
+    files_sorted = sorted(files)
+    logger.info(f"Arquivos remotos encontrados ({len(files_sorted)}): {files_sorted}")
+    return files_sorted
 
 
-def download_file(url: str, output_path: pathlib.Path) -> pathlib.Path:
-    output_path.mkdir(parents=True, exist_ok=True)
-    file_name = output_path / url.split("/")[-1]
-    logger.info(f"Baixando: {file_name}")
+def check_diff(url: str, file_path: str) -> bool:
+    if not os.path.isfile(file_path):
+        return True
+    try:
+        resp = requests.head(url, timeout=10)
+        if resp.status_code != 200:
+            logger.warning(f"HEAD {url} retornou {resp.status_code}, forçando download.")
+            return True
+        new_size = int(resp.headers.get("content-length", 0))
+    except Exception as e:
+        logger.warning(f"Erro ao obter cabeçalho de {url}: {e}")
+        return True
 
-    if not check_diff(url, file_name):
-        logger.info(f"Arquivo {file_name} já está atualizado.")
-        return file_name
+    old_size = os.path.getsize(file_path)
+    if new_size != old_size:
+        logger.info(
+            f"Tamanho diferente para {file_path} (local={old_size}, remoto={new_size}), baixando novamente."
+        )
+        os.remove(file_path)
+        return True
 
-    with requests.get(url, stream=True) as r:
-        r.raise_for_status()
-        with open(file_name, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
+    logger.info(f"Arquivo local {file_path} já está atualizado.")
+    return False
+
+
+def download_file(url: str, output_dir: pathlib.Path) -> pathlib.Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    file_name = url.split("/")[-1]
+    dest = output_dir / file_name
+
+    if not check_diff(url, str(dest)):
+        return dest
+
+    logger.info(f"Baixando {url} -> {dest}")
+    with requests.get(url, stream=True) as resp:
+        resp.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
-
-    logger.info(f"Download concluído: {file_name}")
-    return file_name
+    logger.info(f"Download concluído: {dest}")
+    return dest
 
 
 def extract_files(zip_path: pathlib.Path, extract_to: pathlib.Path):
-    logger.info(f"Extraindo: {zip_path}")
     extract_to.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Extraindo {zip_path} para {extract_to}")
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(extract_to)
 
 
-def move_file_error(path: pathlib.Path):
-    ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
-    destino = ERRO_FILES_PATH / path.name
+def move_file_error(extracted_file_path: pathlib.Path, arquivo: str):
     try:
-        shutil.move(str(path), str(destino))
-        logger.info(f"Arquivo movido para erro: {destino}")
+        ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
+        destino = ERRO_FILES_PATH / arquivo
+        shutil.move(str(extracted_file_path), destino)
+        logger.info(f"Arquivo {arquivo} movido para pasta de erro: {destino}")
     except Exception as e:
-        logger.error(f"Erro ao mover arquivo para erro: {path} -> {e}")
+        logger.error(f"Erro ao mover arquivo {arquivo} para pasta erro: {e}")
 
 
-# =========================
-# CARREGAMENTO VIA COPY
-# =========================
-def copy_csv_to_table(conn, table_name: str, file_path: pathlib.Path, columns: list):
-    """
-    Faz COPY FROM STDIN para uma tabela qualquer (sem tratamento especial).
-    """
-    logger.info(f"Iniciando COPY para {table_name} a partir de {file_path.name}")
-
-    copy_sql = sql.SQL(
-        """
-        COPY {table} ({cols})
-        FROM STDIN
-        WITH (
-            FORMAT csv,
-            DELIMITER ';',
-            QUOTE '"',
-            ESCAPE '"',
-            NULL ''
-        );
-        """
-    ).format(
-        table=sql.Identifier(table_name),
-        cols=sql.SQL(", ").join(sql.Identifier(c) for c in columns),
-    )
-
-    with conn.cursor() as cur, open(file_path, "r", encoding="latin-1", newline="") as f:
-        cur.copy_expert(copy_sql, f)
-    conn.commit()
-    logger.info(f"COPY concluído em {table_name} ({file_path.name})")
-
-
-def load_empresa(conn, file_paths):
-    """
-    EMPRECSV — precisa tratar capital_social com vírgula.
-    Estratégia:
-      1. COPY para tabela temporária empresa_tmp (capital_social TEXT)
-      2. INSERT...SELECT com REPLACE(capital_social, ',', '.')::NUMERIC
-    """
-    logger.info("==== Iniciando carga EMPRESA (COPY + transformação capital_social) ====")
-
+def create_base_tables(conn):
+    logger.info("Criando/recriando tabelas base (DROP + CREATE)...")
     with conn.cursor() as cur:
-        # Tabela temporária na sessão
+        cur.execute("DROP TABLE IF EXISTS info_dados CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS empresa CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS estabelecimento CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS socios CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS simples CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS cnae CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS moti CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS munic CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS natju CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS pais CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS quals CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS empresa_porte CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS estabelecimento_situacao_cadastral CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS socios_identificador CASCADE;")
+
+        # Recria info_dados
         cur.execute(
             """
-            CREATE TEMP TABLE empresa_tmp (
-                cnpj_basico TEXT,
-                razao_social TEXT,
-                natureza_juridica TEXT,
-                qualificacao_responsavel TEXT,
-                capital_social TEXT,
-                porte_empresa TEXT,
-                ente_federativo_responsavel TEXT
-            ) ON COMMIT DROP;
+        CREATE TABLE IF NOT EXISTS info_dados (
+            id SERIAL PRIMARY KEY,
+            ano INTEGER NOT NULL,
+            mes INTEGER NOT NULL,
+            data_atualizacao TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (ano, mes)
+        );
+        """
+        )
+
+        # Tabelas principais
+        cur.execute(
             """
+        CREATE TABLE empresa (
+            cnpj_basico TEXT PRIMARY KEY,
+            razao_social TEXT,
+            natureza_juridica TEXT,
+            qualificacao_responsavel TEXT,
+            capital_social DOUBLE PRECISION,
+            porte_empresa TEXT,
+            ente_federativo_responsavel TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE empresa_porte (
+            codigo INTEGER PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE estabelecimento (
+            cnpj_basico TEXT,
+            cnpj_ordem TEXT,
+            cnpj_dv TEXT,
+            identificador_matriz_filial TEXT,
+            nome_fantasia TEXT,
+            situacao_cadastral TEXT,
+            data_situacao_cadastral TEXT,
+            motivo_situacao_cadastral TEXT,
+            nome_cidade_exterior TEXT,
+            pais TEXT,
+            data_inicio_atividade TEXT,
+            cnae_fiscal_principal TEXT,
+            cnae_fiscal_secundaria TEXT,
+            tipo_logradouro TEXT,
+            logradouro TEXT,
+            numero TEXT,
+            complemento TEXT,
+            bairro TEXT,
+            cep TEXT,
+            uf TEXT,
+            municipio TEXT,
+            ddd_1 TEXT,
+            telefone_1 TEXT,
+            ddd_2 TEXT,
+            telefone_2 TEXT,
+            ddd_fax TEXT,
+            fax TEXT,
+            correio_eletronico TEXT,
+            situacao_especial TEXT,
+            data_situacao_especial TEXT,
+            PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE estabelecimento_situacao_cadastral (
+            codigo INTEGER PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE moti (
+            codigo TEXT PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE munic (
+            codigo TEXT PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE natju (
+            codigo TEXT PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE pais (
+            codigo TEXT PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE quals (
+            codigo TEXT PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE simples (
+            cnpj_basico TEXT PRIMARY KEY,
+            opcao_pelo_simples TEXT,
+            data_opcao_simples TEXT,
+            data_exclusao_simples TEXT,
+            opcao_mei TEXT,
+            data_opcao_mei TEXT,
+            data_exclusao_mei TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE socios (
+            cnpj_basico TEXT,
+            identificador_socio TEXT,
+            nome_socio_razao_social TEXT,
+            cpf_cnpj_socio TEXT,
+            qualificacao_socio TEXT,
+            data_entrada_sociedade TEXT,
+            pais TEXT,
+            representante_legal TEXT,
+            nome_do_representante TEXT,
+            qualificacao_representante_legal TEXT,
+            faixa_etaria TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE socios_identificador (
+            codigo INTEGER PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE cnae (
+            codigo TEXT PRIMARY KEY,
+            descricao TEXT
+        );
+        """
+        )
+
+        # Inserts fixos
+        cur.execute(
+            """
+        INSERT INTO empresa_porte (codigo, descricao) VALUES
+            (1, 'Microempresa'),
+            (3, 'Empresa de Pequeno Porte'),
+            (5, 'Demais');
+        """
+        )
+
+        cur.execute(
+            """
+        INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES
+            (1, 'Nula'),
+            (2, 'Ativa'),
+            (3, 'Suspensa'),
+            (4, 'Inapta'),
+            (5, 'Ativa Não Regular'),
+            (8, 'Baixada');
+        """
+        )
+
+        cur.execute(
+            """
+        INSERT INTO socios_identificador (codigo, descricao) VALUES
+            (1, 'Pessoa Jurídica'),
+            (2, 'Pessoa Física'),
+            (3, 'Sócio Estrangeiro');
+        """
+        )
+
+    conn.commit()
+    logger.info("Tabelas criadas/recriadas com sucesso.")
+
+
+def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
+    if not arquivos_empresa:
+        logger.info("Nenhum arquivo EMPRE encontrado para carga.")
+        return
+
+    logger.info("==== Iniciando carga EMPRESA (COPY + transformação capital_social) ====")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+        CREATE TEMP TABLE empresa_tmp (
+            cnpj_basico TEXT,
+            razao_social TEXT,
+            natureza_juridica TEXT,
+            qualificacao_responsavel TEXT,
+            capital_social_raw TEXT,
+            porte_empresa TEXT,
+            ente_federativo_responsavel TEXT
+        );
+        """
         )
         conn.commit()
 
-        for path in file_paths:
-            logger.info(f"EMPRESA - COPY para empresa_tmp: {path.name}")
-            copy_sql = """
-                COPY empresa_tmp (
+        copy_sql = """
+            COPY empresa_tmp
+            FROM STDIN
+            WITH (FORMAT csv, DELIMITER ';', QUOTE '"', ESCAPE '"', NULL '');
+        """
+
+        for arquivo in arquivos_empresa:
+            caminho = EXTRACTED_FILES_PATH / arquivo
+            if not caminho.exists():
+                logger.warning(f"Arquivo EMPRE não encontrado: {caminho}")
+                continue
+
+            logger.info(f"EMPRESA - COPY para empresa_tmp: {arquivo}")
+            try:
+                cur.execute("TRUNCATE TABLE empresa_tmp;")
+                with open(caminho, "r", encoding="latin-1", newline="") as f:
+                    cur.copy_expert(copy_sql, f)
+
+                cur.execute(
+                    """
+                INSERT INTO empresa (
                     cnpj_basico,
                     razao_social,
                     natureza_juridica,
@@ -677,260 +620,184 @@ def load_empresa(conn, file_paths):
                     porte_empresa,
                     ente_federativo_responsavel
                 )
-                FROM STDIN
-                WITH (
-                    FORMAT csv,
-                    DELIMITER ';',
-                    QUOTE '"',
-                    ESCAPE '"',
-                    NULL ''
-                );
-            """
-            with open(path, "r", encoding="latin-1", newline="") as f:
-                cur.copy_expert(copy_sql, f)
-            conn.commit()
+                SELECT
+                    cnpj_basico,
+                    razao_social,
+                    natureza_juridica,
+                    qualificacao_responsavel,
+                    CASE
+                        WHEN capital_social_raw IS NULL OR capital_social_raw = '' THEN 0.0
+                        ELSE REPLACE(capital_social_raw, ',', '.')::DOUBLE PRECISION
+                    END AS capital_social,
+                    porte_empresa,
+                    ente_federativo_responsavel
+                FROM empresa_tmp;
+                """
+                )
 
-        logger.info("EMPRESA - Inserindo da empresa_tmp para empresa com conversão de vírgula...")
-        cur.execute(
-            """
-            INSERT INTO empresa (
-                cnpj_basico,
-                razao_social,
-                natureza_juridica,
-                qualificacao_responsavel,
-                capital_social,
-                porte_empresa,
-                ente_federativo_responsavel
-            )
-            SELECT
-                cnpj_basico,
-                razao_social,
-                natureza_juridica,
-                qualificacao_responsavel,
-                CASE
-                    WHEN capital_social IS NULL OR capital_social = '' THEN 0
-                    ELSE REPLACE(capital_social, ',', '.')::NUMERIC(18,2)
-                END AS capital_social,
-                porte_empresa,
-                ente_federativo_responsavel
-            FROM empresa_tmp;
-            """
-        )
+                conn.commit()
+                logger.info(f"EMPRESA - arquivo {arquivo} carregado com sucesso.")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Erro ao processar arquivo EMPRE {arquivo}: {e}", exc_info=True)
+                arquivos_com_erro.append(arquivo)
+                move_file_error(caminho, arquivo)
+
+        try:
+            cur.execute("DROP TABLE IF EXISTS empresa_tmp;")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    logger.info("==== Carga EMPRESA finalizada ====")
+
+
+def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arquivos_com_erro, log_label):
+    if not arquivos:
+        logger.info(f"Nenhum arquivo {log_label} encontrado para carga.")
+        return
+
+    logger.info(f"==== Iniciando carga {log_label} (COPY) ====")
+    cols_def = ", ".join(f"{c} TEXT" for c in columns)
+    col_list = ", ".join(columns)
+
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TEMP TABLE {temp_table_name} ({cols_def});")
         conn.commit()
 
-    logger.info("==== EMPRESA carregada com sucesso. ====")
+        copy_sql = f"""
+            COPY {temp_table_name}
+            FROM STDIN
+            WITH (FORMAT csv, DELIMITER ';', QUOTE '"', ESCAPE '"', NULL '');
+        """
+
+        for arquivo in arquivos:
+            caminho = EXTRACTED_FILES_PATH / arquivo
+            if not caminho.exists():
+                logger.warning(f"Arquivo {log_label} não encontrado: {caminho}")
+                continue
+
+            logger.info(f"{log_label} - COPY para {temp_table_name}: {arquivo}")
+            try:
+                cur.execute(f"TRUNCATE TABLE {temp_table_name};")
+                with open(caminho, "r", encoding="latin-1", newline="") as f:
+                    cur.copy_expert(copy_sql, f)
+
+                cur.execute(
+                    f"""
+                INSERT INTO {table_name} ({col_list})
+                SELECT {col_list}
+                FROM {temp_table_name};
+                """
+                )
+                conn.commit()
+                logger.info(f"{log_label} - arquivo {arquivo} carregado com sucesso.")
+            except Exception as e:
+                conn.rollback()
+                logger.error(
+                    f"Erro ao processar arquivo {log_label} {arquivo}: {e}",
+                    exc_info=True,
+                )
+                arquivos_com_erro.append(arquivo)
+                move_file_error(caminho, arquivo)
+
+        try:
+            cur.execute(f"DROP TABLE IF EXISTS {temp_table_name};")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
+    logger.info(f"==== Carga {log_label} finalizada ====")
 
 
-def load_estabelecimento(conn, file_paths):
-    cols = [
-        "cnpj_basico",
-        "cnpj_ordem",
-        "cnpj_dv",
-        "identificador_matriz_filial",
-        "nome_fantasia",
-        "situacao_cadastral",
-        "data_situacao_cadastral",
-        "motivo_situacao_cadastral",
-        "nome_cidade_exterior",
-        "pais",
-        "data_inicio_atividade",
-        "cnae_fiscal_principal",
-        "cnae_fiscal_secundaria",
-        "tipo_logradouro",
-        "logradouro",
-        "numero",
-        "complemento",
-        "bairro",
-        "cep",
-        "uf",
-        "municipio",
-        "ddd_1",
-        "telefone_1",
-        "ddd_2",
-        "telefone_2",
-        "ddd_fax",
-        "fax",
-        "correio_eletronico",
-        "situacao_especial",
-        "data_situacao_especial",
-    ]
-    logger.info("==== Iniciando carga ESTABELECIMENTO ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "estabelecimento", path, cols)
-    logger.info("==== ESTABELECIMENTO carregado. ====")
+def inserir_info_dados(conn, info):
+    if not info:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+        INSERT INTO info_dados (ano, mes, data_atualizacao)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (ano, mes)
+        DO UPDATE SET data_atualizacao = EXCLUDED.data_atualizacao;
+        """,
+            (info["ano"], info["mes"], info["data_atualizacao"]),
+        )
+    conn.commit()
+    logger.info(
+        f"Registro de atualização gravado em info_dados: {info['ano']}-{info['mes']:02d}"
+    )
 
 
-def load_socios(conn, file_paths):
-    cols = [
-        "cnpj_basico",
-        "identificador_socio",
-        "nome_socio_razao_social",
-        "cpf_cnpj_socio",
-        "qualificacao_socio",
-        "data_entrada_sociedade",
-        "pais",
-        "representante_legal",
-        "nome_do_representante",
-        "qualificacao_representante_legal",
-        "faixa_etaria",
-    ]
-    logger.info("==== Iniciando carga SOCIOS ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "socios", path, cols)
-    logger.info("==== SOCIOS carregado. ====")
-
-
-def load_simples(conn, file_paths):
-    cols = [
-        "cnpj_basico",
-        "opcao_pelo_simples",
-        "data_opcao_simples",
-        "data_exclusao_simples",
-        "opcao_mei",
-        "data_opcao_mei",
-        "data_exclusao_mei",
-    ]
-    logger.info("==== Iniciando carga SIMPLES ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "simples", path, cols)
-    logger.info("==== SIMPLES carregado. ====")
-
-
-def load_cnae(conn, file_paths):
-    cols = ["codigo", "descricao"]
-    logger.info("==== Iniciando carga CNAE ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "cnae", path, cols)
-    logger.info("==== CNAE carregado. ====")
-
-
-def load_moti(conn, file_paths):
-    cols = ["codigo", "descricao"]
-    logger.info("==== Iniciando carga MOTI ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "moti", path, cols)
-    logger.info("==== MOTI carregado. ====")
-
-
-def load_munic(conn, file_paths):
-    cols = ["codigo", "descricao"]
-    logger.info("==== Iniciando carga MUNIC ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "munic", path, cols)
-    logger.info("==== MUNIC carregado. ====")
-
-
-def load_natju(conn, file_paths):
-    cols = ["codigo", "descricao"]
-    logger.info("==== Iniciando carga NATJU ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "natju", path, cols)
-    logger.info("==== NATJU carregado. ====")
-
-
-def load_pais(conn, file_paths):
-    cols = ["codigo", "descricao"]
-    logger.info("==== Iniciando carga PAIS ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "pais", path, cols)
-    logger.info("==== PAIS carregado. ====")
-
-
-def load_quals(conn, file_paths):
-    cols = ["codigo", "descricao"]
-    logger.info("==== Iniciando carga QUALS ====")
-    for path in file_paths:
-        copy_csv_to_table(conn, "quals", path, cols)
-    logger.info("==== QUALS carregado. ====")
-
-
-# =========================
-# ÍNDICES
-# =========================
 def criar_indices():
-    """
-    Cria índices auxiliares para acelerar joins por cnpj_basico.
-    Usa autocommit porque CREATE INDEX CONCURRENTLY não pode estar em transação.
-    """
-    conn = connect_db(autocommit=True)
     try:
+        conn = connect_db(autocommit=True)
         with conn.cursor() as cur:
-            logger.info("Criando índices auxiliar(es)...")
+            logger.info("Criando índices (CONCURRENTLY) nas tabelas principais...")
 
             indices = [
+                ("empresa", "cnpj_basico"),
                 ("estabelecimento", "cnpj_basico"),
                 ("socios", "cnpj_basico"),
                 ("simples", "cnpj_basico"),
             ]
 
             for tabela, coluna in indices:
-                nome_indice = f"{tabela}_{coluna}_idx"
+                nome = f"{tabela}_{coluna}_idx"
                 try:
                     cur.execute(
-                        sql.SQL(
-                            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {idx} ON {tbl} ({col});"
-                        ).format(
-                            idx=sql.Identifier(nome_indice),
-                            tbl=sql.Identifier(tabela),
-                            col=sql.Identifier(coluna),
-                        )
+                        f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome} ON {tabela} ({coluna});"
                     )
-                    logger.info(f"Índice criado/verificado: {nome_indice}")
+                    logger.info(f"Índice {nome} criado/verificado com sucesso.")
                 except Exception as e:
                     logger.error(
-                        f"Erro ao criar índice {nome_indice} em {tabela}: {e}",
+                        f"Erro ao criar índice {nome} em {tabela}({coluna}): {e}",
                         exc_info=True,
                     )
-        logger.info("Criação de índices finalizada.")
-    finally:
+
         conn.close()
-        gc.collect()
+        logger.info("Criação de índices finalizada.")
+    except Exception as e:
+        logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
 
 
-# =========================
-# ETL PRINCIPAL
-# =========================
 def etl_process():
-    start_time = datetime.now()
     try:
-        # Diretórios
         OUTPUT_FILES_PATH.mkdir(parents=True, exist_ok=True)
         EXTRACTED_FILES_PATH.mkdir(parents=True, exist_ok=True)
         ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
 
         logger.info(
-            f"Diretórios:\n - downloads: {OUTPUT_FILES_PATH}\n - extraídos: {EXTRACTED_FILES_PATH}\n - erro: {ERRO_FILES_PATH}"
+            f"Diretórios usados:\n"
+            f" - Download: {OUTPUT_FILES_PATH}\n"
+            f" - Extração: {EXTRACTED_FILES_PATH}\n"
+            f" - Erros: {ERRO_FILES_PATH}"
         )
+
+        inicio = datetime.now()
 
         info = verificar_nova_atualizacao()
         if not info:
-            logger.info("Nenhuma atualização nova encontrada. Encerrando.")
+            logger.info("Nenhuma nova atualização a processar. Encerrando ETL.")
             return
 
-        # Lista de arquivos do mês
         files = get_files(info["url"])
         if not files:
-            logger.info("Nenhum arquivo .zip para processar. Encerrando.")
+            logger.error("Nenhum arquivo .zip encontrado para o mês selecionado.")
             return
 
-        # Download
-        zip_files = []
-        for f in files:
-            url = info["url"] + f
-            zip_files.append(download_file(url, OUTPUT_FILES_PATH))
+        zip_paths = []
+        for fname in files:
+            url = info["url"] + fname
+            zip_path = download_file(url, OUTPUT_FILES_PATH)
+            zip_paths.append(zip_path)
 
-        # Extração
-        for zf in zip_files:
-            extract_files(zf, EXTRACTED_FILES_PATH)
+        for zp in zip_paths:
+            extract_files(zp, EXTRACTED_FILES_PATH)
 
         logger.info("Todos os arquivos foram baixados e extraídos. Preparando carga via COPY...")
 
-        # Cria/recria tabelas
-        create_tables()
-
-        # Agrupar arquivos por tipo
         arquivos_empresa = []
-        arquivos_estabelecimento = []
+        arquivos_estab = []
         arquivos_socios = []
         arquivos_simples = []
         arquivos_cnae = []
@@ -941,33 +808,29 @@ def etl_process():
         arquivos_quals = []
 
         for fname in os.listdir(EXTRACTED_FILES_PATH):
-            path = EXTRACTED_FILES_PATH / fname
-            if not path.is_file():
-                continue
-
-            if "EMPRE" in fname.upper():
-                arquivos_empresa.append(path)
-            elif "ESTABELE" in fname.upper():
-                arquivos_estabelecimento.append(path)
-            elif "SOCIO" in fname.upper():
-                arquivos_socios.append(path)
-            elif "SIMPLES" in fname.upper():
-                arquivos_simples.append(path)
-            elif "CNAE" in fname.upper():
-                arquivos_cnae.append(path)
-            elif "MOTI" in fname.upper():
-                arquivos_moti.append(path)
-            elif "MUNIC" in fname.upper():
-                arquivos_munic.append(path)
-            elif "NATJU" in fname.upper():
-                arquivos_natju.append(path)
-            elif "PAIS" in fname.upper():
-                arquivos_pais.append(path)
-            elif "QUALS" in fname.upper():
-                arquivos_quals.append(path)
+            if "EMPRE" in fname:
+                arquivos_empresa.append(fname)
+            elif "ESTABELE" in fname:
+                arquivos_estab.append(fname)
+            elif "SOCIO" in fname:
+                arquivos_socios.append(fname)
+            elif "SIMPLES" in fname:
+                arquivos_simples.append(fname)
+            elif "CNAE" in fname:
+                arquivos_cnae.append(fname)
+            elif "MOTI" in fname:
+                arquivos_moti.append(fname)
+            elif "MUNIC" in fname:
+                arquivos_munic.append(fname)
+            elif "NATJU" in fname:
+                arquivos_natju.append(fname)
+            elif "PAIS" in fname:
+                arquivos_pais.append(fname)
+            elif "QUALS" in fname:
+                arquivos_quals.append(fname)
 
         arquivos_empresa.sort()
-        arquivos_estabelecimento.sort()
+        arquivos_estab.sort()
         arquivos_socios.sort()
         arquivos_simples.sort()
         arquivos_cnae.sort()
@@ -977,71 +840,249 @@ def etl_process():
         arquivos_pais.sort()
         arquivos_quals.sort()
 
-        conn = connect_db()
+        logger.info(
+            "Resumo arquivos extraídos:\n"
+            f"  EMPRE: {len(arquivos_empresa)}\n"
+            f"  ESTABELE: {len(arquivos_estab)}\n"
+            f"  SOCIO: {len(arquivos_socios)}\n"
+            f"  SIMPLES: {len(arquivos_simples)}\n"
+            f"  CNAE: {len(arquivos_cnae)}\n"
+            f"  MOTI: {len(arquivos_moti)}\n"
+            f"  MUNIC: {len(arquivos_munic)}\n"
+            f"  NATJU: {len(arquivos_natju)}\n"
+            f"  PAIS: {len(arquivos_pais)}\n"
+            f"  QUALS: {len(arquivos_quals)}"
+        )
 
+        arquivos_com_erro = []
+
+        conn = connect_db()
         try:
-            if arquivos_empresa:
-                load_empresa(conn, arquivos_empresa)
-            if arquivos_estabelecimento:
-                load_estabelecimento(conn, arquivos_estabelecimento)
-            if arquivos_socios:
-                load_socios(conn, arquivos_socios)
-            if arquivos_simples:
-                load_simples(conn, arquivos_simples)
-            if arquivos_cnae:
-                load_cnae(conn, arquivos_cnae)
-            if arquivos_moti:
-                load_moti(conn, arquivos_moti)
-            if arquivos_munic:
-                load_munic(conn, arquivos_munic)
-            if arquivos_natju:
-                load_natju(conn, arquivos_natju)
-            if arquivos_pais:
-                load_pais(conn, arquivos_pais)
-            if arquivos_quals:
-                load_quals(conn, arquivos_quals)
+            create_base_tables(conn)
+
+            # EMPRESA (com tratamento de capital_social)
+            load_empresa(conn, arquivos_empresa, arquivos_com_erro)
+
+            # ESTABELECIMENTO
+            cols_estab = [
+                "cnpj_basico",
+                "cnpj_ordem",
+                "cnpj_dv",
+                "identificador_matriz_filial",
+                "nome_fantasia",
+                "situacao_cadastral",
+                "data_situacao_cadastral",
+                "motivo_situacao_cadastral",
+                "nome_cidade_exterior",
+                "pais",
+                "data_inicio_atividade",
+                "cnae_fiscal_principal",
+                "cnae_fiscal_secundaria",
+                "tipo_logradouro",
+                "logradouro",
+                "numero",
+                "complemento",
+                "bairro",
+                "cep",
+                "uf",
+                "municipio",
+                "ddd_1",
+                "telefone_1",
+                "ddd_2",
+                "telefone_2",
+                "ddd_fax",
+                "fax",
+                "correio_eletronico",
+                "situacao_especial",
+                "data_situacao_especial",
+            ]
+            load_generic_table(
+                conn,
+                "estabelecimento",
+                "estabelecimento_tmp",
+                cols_estab,
+                arquivos_estab,
+                arquivos_com_erro,
+                "ESTABELECIMENTO",
+            )
+
+            # SOCIOS
+            cols_socios = [
+                "cnpj_basico",
+                "identificador_socio",
+                "nome_socio_razao_social",
+                "cpf_cnpj_socio",
+                "qualificacao_socio",
+                "data_entrada_sociedade",
+                "pais",
+                "representante_legal",
+                "nome_do_representante",
+                "qualificacao_representante_legal",
+                "faixa_etaria",
+            ]
+            load_generic_table(
+                conn,
+                "socios",
+                "socios_tmp",
+                cols_socios,
+                arquivos_socios,
+                arquivos_com_erro,
+                "SOCIOS",
+            )
+
+            # SIMPLES
+            cols_simples = [
+                "cnpj_basico",
+                "opcao_pelo_simples",
+                "data_opcao_simples",
+                "data_exclusao_simples",
+                "opcao_mei",
+                "data_opcao_mei",
+                "data_exclusao_mei",
+            ]
+            load_generic_table(
+                conn,
+                "simples",
+                "simples_tmp",
+                cols_simples,
+                arquivos_simples,
+                arquivos_com_erro,
+                "SIMPLES",
+            )
+
+            # CNAE
+            cols_cnae = ["codigo", "descricao"]
+            load_generic_table(
+                conn,
+                "cnae",
+                "cnae_tmp",
+                cols_cnae,
+                arquivos_cnae,
+                arquivos_com_erro,
+                "CNAE",
+            )
+
+            # MOTI
+            cols_moti = ["codigo", "descricao"]
+            load_generic_table(
+                conn,
+                "moti",
+                "moti_tmp",
+                cols_moti,
+                arquivos_moti,
+                arquivos_com_erro,
+                "MOTI",
+            )
+
+            # MUNIC
+            cols_munic = ["codigo", "descricao"]
+            load_generic_table(
+                conn,
+                "munic",
+                "munic_tmp",
+                cols_munic,
+                arquivos_munic,
+                arquivos_com_erro,
+                "MUNIC",
+            )
+
+            # NATJU
+            cols_natju = ["codigo", "descricao"]
+            load_generic_table(
+                conn,
+                "natju",
+                "natju_tmp",
+                cols_natju,
+                arquivos_natju,
+                arquivos_com_erro,
+                "NATJU",
+            )
+
+            # PAIS
+            cols_pais = ["codigo", "descricao"]
+            load_generic_table(
+                conn,
+                "pais",
+                "pais_tmp",
+                cols_pais,
+                arquivos_pais,
+                arquivos_com_erro,
+                "PAIS",
+            )
+
+            # QUALS
+            cols_quals = ["codigo", "descricao"]
+            load_generic_table(
+                conn,
+                "quals",
+                "quals_tmp",
+                cols_quals,
+                arquivos_quals,
+                arquivos_com_erro,
+                "QUALS",
+            )
+
+            inserir_info_dados(conn, info)
+
         finally:
             conn.close()
 
-        # Registra versão em info_dados
-        inserir_info_dados(info)
+        if arquivos_com_erro:
+            logger.warning(f"Arquivos com erro durante o ETL: {arquivos_com_erro}")
+            erro_list_path = BASE_DIR / "arquivos_com_erro.txt"
+            with open(erro_list_path, "w", encoding="utf-8") as f:
+                for nome in arquivos_com_erro:
+                    f.write(nome + "\n")
+            logger.info(f"Lista de arquivos com erro salva em: {erro_list_path}")
 
-        # Cria índices auxiliares
-        criar_indices()
+        try:
+            shutil.rmtree(OUTPUT_FILES_PATH)
+            shutil.rmtree(EXTRACTED_FILES_PATH)
+            logger.info("Pastas de download e extração removidas com sucesso.")
+        except Exception as e:
+            logger.warning(f"Não foi possível remover pastas temporárias: {e}")
 
-        # Limpa arquivos
-        shutil.rmtree(OUTPUT_FILES_PATH, ignore_errors=True)
-        shutil.rmtree(EXTRACTED_FILES_PATH, ignore_errors=True)
+        try:
+            criar_indices()
+        except Exception:
+            logger.error("Falha ao criar índices pós-carga.", exc_info=True)
 
-        logger.info("Arquivos temporários removidos.")
-        logger.info(f"ETL concluído com sucesso em {converter_segundos(start_time, datetime.now())}")
-
+        fim = datetime.now()
+        logger.info(
+            f"ETL concluído com sucesso em {converter_segundos(inicio, fim)}."
+        )
     except Exception as e:
-        logger.error(f"Erro no processo ETL: {e}", exc_info=True)
-        logger.critical("Não foi possível concluir o ETL")
+        logger.error(f"Erro geral no processo ETL: {e}", exc_info=True)
+        logger.critical("Não foi possível concluir o ETL.")
         sys.exit(1)
 
 
-# =========================
-# MAIN
-# =========================
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ETL Dados Abertos CNPJ - Receita Federal (COPY baseado)")
+def main():
+    parser = argparse.ArgumentParser(
+        description="ETL Dados Abertos CNPJ - Receita Federal do Brasil (COPY)."
+    )
     parser.add_argument(
         "--etl",
         action="store_true",
-        help="Executa o processo completo de ETL (download, extração, carga e índices)",
+        help="Executa o processo completo de ETL (download, extração, carga e índices).",
     )
     parser.add_argument(
         "--inserir_indice",
         action="store_true",
-        help="Apenas cria índices nas tabelas (sem recarregar arquivos)",
+        help="Cria índices nas tabelas principais (sem recarregar dados).",
     )
 
     args = parser.parse_args()
 
     if args.etl:
         etl_process()
-
-    if args.inserir_indice:
+    elif args.inserir_indice:
         criar_indices()
+    else:
+        print(
+            "Use --etl para rodar o ETL completo ou --inserir_indice para apenas criar índices."
+        )
+
+
+if __name__ == "__main__":
+    main()
