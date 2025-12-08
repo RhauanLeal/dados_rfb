@@ -101,8 +101,6 @@ def connect_db(autocommit: bool = False):
     """
     Cria conexão com o PostgreSQL usando variáveis do .env
     """
-    from urllib.parse import quote_plus
-
     user = os.getenv("DB_USER")
     passw = os.getenv("DB_PASSWORD")
     host = os.getenv("DB_HOST")
@@ -123,17 +121,13 @@ def connect_db(autocommit: bool = False):
         logger.error(f"Variáveis faltando no .env: {', '.join(missing)}")
         raise ValueError(f"Configuração do banco incompleta: {', '.join(missing)}")
 
-    user_escaped = quote_plus(user)
-    passw_escaped = quote_plus(passw) if passw else ""
-
     dsn = f"dbname={database} user={user} password={passw} host={host} port={port}"
-    uri = f"postgresql://{user_escaped}:{passw_escaped}@{host}:{port}/{database}"
 
     try:
         conn = psycopg2.connect(dsn)
         if autocommit:
             conn.set_session(autocommit=True)
-        logger.info(f"✅ Conectado ao banco: {uri}")
+        logger.info("✅ Conectado ao banco.")
         return conn
     except Exception as e:
         logger.error(f"❌ Erro na conexão com o banco: {e}")
@@ -544,6 +538,25 @@ def create_tables():
 # =========================
 # DOWNLOAD E EXTRAÇÃO
 # =========================
+# Função para verificar se o arquivo já foi baixado e se é necessário atualizar
+def check_diff(url, file_name):
+    if not os.path.isfile(file_name):
+        return True
+
+    try:
+        response = requests.head(url, timeout=10)
+        new_size = int(response.headers.get("content-length", 0))
+    except Exception as e:
+        logger.warning(f"Erro ao verificar cabeçalho de {url}: {e}")
+        return True
+
+    old_size = os.path.getsize(file_name)
+    if new_size != old_size:
+        os.remove(file_name)
+        return True
+
+    return False
+
 def get_files(base_url: str):
     resp = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
     if resp.status_code != 200:
@@ -561,6 +574,10 @@ def download_file(url: str, output_path: pathlib.Path) -> pathlib.Path:
     output_path.mkdir(parents=True, exist_ok=True)
     file_name = output_path / url.split("/")[-1]
     logger.info(f"Baixando: {file_name}")
+
+    if not check_diff(url, file_name):
+        logger.info(f"Arquivo {file_name} já está atualizado.")
+        return file_name
 
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
