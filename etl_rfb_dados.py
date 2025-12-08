@@ -14,6 +14,16 @@ from sqlalchemy import create_engine
 from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from bs4 import BeautifulSoup
 from datetime import datetime
+'''
+Sistema de importação dos dados abertos da Receita Federal do Brasil (RFB)
+* arquivos baixados via HTTP são armazenados localmente,
+* arquivos são extraídos de .zip para diretórios locais, possuem codificação UNIX(LF) e ANSI (latin-1),
+* arquivos extraídos via ETL são carregados via Pandas e inseridos em tabelas permanentes,
+* tabela info_dados mantém controle de versões (ano, mês, data_atualizacao),
+* logs são armazenados em arquivo e exibidos no console.
+* tratamento de erros e movimentação de arquivos com problemas para diretório específico.
+* finalizando a importação os arquivos baixados e extraídos são excluídos para economizar espaço em disco.
+'''
 
 # Garantir diretório de logs
 LOG_DIR = pathlib.Path("logs")

@@ -1,17 +1,27 @@
 # etl_rfb_dados.py
 import argparse
 import os
+import io
 import sys
 import logging
 import shutil
 import requests
 import zipfile
 import pathlib
-import gc
 import psycopg2
 from dotenv import load_dotenv, find_dotenv
 from bs4 import BeautifulSoup
 from datetime import datetime
+'''
+Sistema de importação dos dados abertos da Receita Federal do Brasil (RFB)
+* arquivos baixados via HTTP são armazenados localmente,
+* arquivos são extraídos de .zip para diretórios locais, possuem codificação UNIX(LF) e ANSI (latin-1),
+* arquivos extraídos via ETL são carregados via COPY para tabelas temporárias e inseridos em tabelas permanentes,
+* tabela info_dados mantém controle de versões (ano, mês, data_atualizacao),
+* logs são armazenados em arquivo e exibidos no console.
+* tratamento de erros e movimentação de arquivos com problemas para diretório específico.
+* finalizando a importação os arquivos baixados e extraídos são excluídos para economizar espaço em disco.
+'''
 
 # Diretórios fixos para armazenar os arquivos
 BASE_DIR = pathlib.Path().resolve()
@@ -558,8 +568,14 @@ def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
             logger.info(f"EMPRESA - COPY para empresa_tmp: {arquivo}")
             try:
                 cur.execute("TRUNCATE TABLE empresa_tmp;")
-                with open(caminho, "r", encoding="latin-1", newline="") as f:
-                    cur.copy_expert(copy_sql, f)
+
+                # LEITURA SEGURO SEM NULL BYTE
+                with open(caminho, "rb") as f:
+                    raw = f.read().replace(b"\x00", b"")
+
+                texto = raw.decode("latin-1", errors="replace")
+
+                cur.copy_expert(copy_sql, io.StringIO(texto))
 
                 cur.execute(
                     """
@@ -631,8 +647,14 @@ def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arq
             logger.info(f"{log_label} - COPY para {temp_table_name}: {arquivo}")
             try:
                 cur.execute(f"TRUNCATE TABLE {temp_table_name};")
-                with open(caminho, "r", encoding="latin-1", newline="") as f:
-                    cur.copy_expert(copy_sql, f)
+                
+                # LEITURA SEGURO SEM NULL BYTE
+                with open(caminho, "rb") as f:
+                    raw = f.read().replace(b"\x00", b"")
+
+                texto = raw.decode("latin-1", errors="replace")
+
+                cur.copy_expert(copy_sql, io.StringIO(texto))
 
                 cur.execute(
                     f"""
