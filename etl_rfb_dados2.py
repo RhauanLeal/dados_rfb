@@ -1,7 +1,6 @@
 # etl_rfb_dados.py
 import argparse
 import os
-import io
 import sys
 import logging
 import shutil
@@ -64,6 +63,17 @@ if not dotenv_path:
 
 load_dotenv(dotenv_path)
 
+COPY_CSV = """
+    COPY {temp_table}
+    FROM STDIN
+    WITH (
+        FORMAT csv,
+        DELIMITER ';',
+        QUOTE '"',
+        ESCAPE '"',
+        NULL ''
+    );
+"""
 
 def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
     diferenca = tempo_final - tempo_inicial
@@ -538,13 +548,37 @@ def stream_file_lines(path):
             # Limpa null bytes e decodifica
             yield line.replace(b"\x00", b"").decode("latin-1", errors="replace")
 
+class StreamingTextIO:
+    """Abstração para COPY EXPERT ler linha a linha sem carregar tudo na memória."""
+    def __init__(self, path):
+        self.path = path
+        self.file = open(path, "rb")
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self.file.readline()
+        if not line:
+            raise StopIteration
+        return line.replace(b"\x00", b"").decode("latin-1", errors="replace")
+
+    def read(self, size=-1):
+        # COPY ... FROM STDIN sometimes calls read()
+        chunk = self.file.read(size)
+        if not chunk:
+            return ''
+        return chunk.replace(b"\x00", b"").decode("latin-1", errors="replace")
+
+    def close(self):
+        self.file.close()
 
 def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
     if not arquivos_empresa:
-        logger.info("Nenhum arquivo EMPRE encontrado para carga.")
+        logger.info("Nenhum arquivo EMPRE encontrado.")
         return
 
-    logger.info("==== Iniciando carga EMPRESA (STREAMING COPY) ====")
+    logger.info("==== Iniciando carga EMPRESA (STREAMING COPY EXPERT) ====")
 
     with conn.cursor() as cur:
         cur.execute("""
@@ -560,28 +594,19 @@ def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
         """)
         conn.commit()
 
+        copy_sql = COPY_CSV.format(temp_table="empresa_tmp")
+
         for arquivo in arquivos_empresa:
             caminho = EXTRACTED_FILES_PATH / arquivo
-            logger.info(f"EMPRESA - carregando (streaming): {arquivo}")
+            logger.info(f"EMPRESA - carregando via streaming: {arquivo}")
 
             try:
                 cur.execute("TRUNCATE empresa_tmp;")
 
-                # COPY usando streaming linha a linha
-                with open(caminho, "rb") as f:
-                    cur.copy_from(
-                        io.TextIOWrapper(
-                            f,
-                            encoding="latin-1",
-                            errors="replace",
-                            newline="",
-                        ),
-                        "empresa_tmp",
-                        sep=';',
-                        null=""
-                    )
+                stream = StreamingTextIO(caminho)
+                cur.copy_expert(copy_sql, stream)
+                stream.close()
 
-                # Inserção com conversão do capital_social
                 cur.execute("""
                     INSERT INTO empresa (
                         cnpj_basico,
@@ -608,11 +633,11 @@ def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
                 """)
 
                 conn.commit()
-                logger.info(f"EMPRESA - arquivo {arquivo} carregado com sucesso.")
+                logger.info(f"EMPRESA carregado: {arquivo}")
 
             except Exception as e:
                 conn.rollback()
-                logger.error(f"Erro ao processar EMPRESA {arquivo}: {e}", exc_info=True)
+                logger.error(f"ERRO EMPRESA {arquivo}: {e}", exc_info=True)
                 arquivos_com_erro.append(arquivo)
                 move_file_error(caminho, arquivo)
 
@@ -624,10 +649,10 @@ def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
 
 def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arquivos_com_erro, log_label):
     if not arquivos:
-        logger.info(f"Nenhum arquivo {log_label} encontrado para carga.")
+        logger.info(f"Nenhum arquivo {log_label} encontrado.")
         return
 
-    logger.info(f"==== Iniciando carga {log_label} (STREAMING COPY) ====")
+    logger.info(f"==== Iniciando carga {log_label} (STREAMING COPY EXPERT) ====")
 
     cols_def = ", ".join(f"{c} TEXT" for c in columns)
     col_list = ", ".join(columns)
@@ -636,37 +661,33 @@ def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arq
         cur.execute(f"CREATE TEMP TABLE {temp_table_name} ({cols_def});")
         conn.commit()
 
+        copy_sql = COPY_CSV.format(temp_table=temp_table_name)
+
         for arquivo in arquivos:
             caminho = EXTRACTED_FILES_PATH / arquivo
-            logger.info(f"{log_label} - carregando (streaming): {arquivo}")
+            logger.info(f"{log_label} - carregando via streaming: {arquivo}")
 
             try:
                 cur.execute(f"TRUNCATE {temp_table_name};")
 
-                # COPY direto com streaming, sem buffer gigante
-                with open(caminho, "rb") as f:
-                    cur.copy_from(
-                        io.TextIOWrapper(
-                            f,
-                            encoding="latin-1",
-                            errors="replace",
-                            newline=""
-                        ),
-                        temp_table_name,
-                        sep=';',
-                        null=""
-                    )
+                stream = StreamingTextIO(caminho)
+                cur.copy_expert(copy_sql, stream)
+                stream.close()
 
                 cur.execute(
-                    f"INSERT INTO {table_name} ({col_list}) SELECT {col_list} FROM {temp_table_name};"
+                    f"""
+                    INSERT INTO {table_name} ({col_list})
+                    SELECT {col_list}
+                    FROM {temp_table_name};
+                    """
                 )
 
                 conn.commit()
-                logger.info(f"{log_label} - arquivo {arquivo} carregado com sucesso.")
+                logger.info(f"{log_label} carregado: {arquivo}")
 
             except Exception as e:
                 conn.rollback()
-                logger.error(f"Erro ao processar {log_label} {arquivo}: {e}", exc_info=True)
+                logger.error(f"ERRO {log_label} {arquivo}: {e}", exc_info=True)
                 arquivos_com_erro.append(arquivo)
                 move_file_error(caminho, arquivo)
 
