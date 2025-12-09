@@ -53,8 +53,8 @@ EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
 
 # Tamanho padrão de chunk para leitura dos arquivos grandes
-CHUNK_ROWS=250_000  # 250 mil linhas por chunk (leitura)
-CHUNK_TO_SQL=20_000 # 20 mil linhas por insert no to_sql (insert)
+CHUNK_ROWS  = 1_000_000  # 1 milhão de linhas por chunk (leitura)
+CHUNK_TO_SQL= 10_000     # 10 mil linhas por insert no to_sql (insert)
 
 logger.info("\n ================================================================================")
 logger.info("Iniciando ETL - dados_rfb")
@@ -697,6 +697,9 @@ def etl_process():
         if not info:
             logger.info("Nenhuma atualização nova encontrada. Encerrando.")
             return
+        
+        logger.info(f"Nova atualização encontrada: {info['ano']}-{info['mes']:02d} em {info['data_atualizacao']}")
+        logger.info(f"URL base para download: {info['url']}")
         
         files = get_files(info['url'])
         if not files:

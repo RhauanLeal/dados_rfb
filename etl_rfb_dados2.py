@@ -38,11 +38,23 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler(log_file, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file),
+        logging.StreamHandler(sys.stdout)
     ],
 )
+# Logger principal
 logger = logging.getLogger(__name__)
+
+# Logger exclusivo para progresso
+progress_logger = logging.getLogger("progress")
+progress_logger.setLevel(logging.INFO)
+
+# Apenas imprime no stdout, sem salvar em arquivo
+progress_stream = logging.StreamHandler(sys.stdout)
+progress_stream.setFormatter(logging.Formatter("%(message)s"))
+
+progress_logger.handlers = [progress_stream]
+progress_logger.propagate = False  # Não deixar repassar ao logger principal
 
 logger.info("\n ================================================================================")
 logger.info("Iniciando ETL - dados_rfb (versão COPY / TEMP TABLE)")
@@ -74,6 +86,123 @@ COPY_CSV = """
         NULL ''
     );
 """
+
+class StreamingTextIO:
+    """
+    File-like object para COPY EXPERT com:
+    - leitura em streaming
+    - remoção de NULL bytes
+    - decode latin-1
+    - barra de progresso com ETA
+    - zero uso de RAM
+    """
+    def __init__(self, path, label="", show_progress=True):
+        self.path = path
+        self.label = label
+        self.show_progress = show_progress
+
+        self.file = open(path, "rb")
+        self.total_size = os.path.getsize(path)
+        self.bytes_read = 0
+        self.last_percent_logged = -5
+
+        # ETA
+        self.start_time = datetime.now()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self.file.readline()
+        if not line:
+            raise StopIteration
+
+        self.bytes_read += len(line)
+
+        if self.show_progress:
+            self._print_progress()
+
+        return line.replace(b"\x00", b"").decode("latin-1", errors="replace")
+
+    def read(self, size=-1):
+        chunk = self.file.read(size)
+        if not chunk:
+            return ""
+
+        self.bytes_read += len(chunk)
+
+        if self.show_progress:
+            self._print_progress()
+
+        return chunk.replace(b"\x00", b"").decode("latin-1", errors="replace")
+
+    def _print_progress(self):
+        percent = int((self.bytes_read / self.total_size) * 100)
+
+        if percent < self.last_percent_logged + 5:
+            return
+
+        elapsed = (datetime.now() - self.start_time).total_seconds()
+        if percent > 0:
+            # ETA formula: time_remaining = elapsed * (100/percent - 1)
+            eta_seconds = elapsed * (100 / percent - 1)
+        else:
+            eta_seconds = 0
+
+        eta_str = self._format_eta(eta_seconds)
+
+        mb_read = self.bytes_read / (1024 * 1024)
+        mb_total = self.total_size / (1024 * 1024)
+
+        progress_logger.info(
+            f"{self.label} [{percent}%] "
+            f"- {mb_read:.1f} MB de {mb_total:.1f} MB "
+            f"(ETA: {eta_str})"
+        )
+
+        self.last_percent_logged = percent
+
+    def _format_eta(self, eta_seconds):
+        if eta_seconds <= 0:
+            return "0s"
+
+        m, s = divmod(int(eta_seconds), 60)
+        h, m = divmod(m, 60)
+
+        if h > 0:
+            return f"{h}h {m}m {s}s"
+        elif m > 0:
+            return f"{m}m {s}s"
+        else:
+            return f"{s}s"
+
+    def close(self):
+        self.file.close()
+
+# class StreamingTextIO:
+#     """Abstração para COPY EXPERT ler linha a linha sem carregar tudo na memória."""
+#     def __init__(self, path):
+#         self.path = path
+#         self.file = open(path, "rb")
+
+#     def __iter__(self):
+#         return self
+
+#     def __next__(self):
+#         line = self.file.readline()
+#         if not line:
+#             raise StopIteration
+#         return line.replace(b"\x00", b"").decode("latin-1", errors="replace")
+
+#     def read(self, size=-1):
+#         # COPY ... FROM STDIN sometimes calls read()
+#         chunk = self.file.read(size)
+#         if not chunk:
+#             return ''
+#         return chunk.replace(b"\x00", b"").decode("latin-1", errors="replace")
+
+#     def close(self):
+#         self.file.close()
 
 def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
     diferenca = tempo_final - tempo_inicial
@@ -548,30 +677,6 @@ def stream_file_lines(path):
             # Limpa null bytes e decodifica
             yield line.replace(b"\x00", b"").decode("latin-1", errors="replace")
 
-class StreamingTextIO:
-    """Abstração para COPY EXPERT ler linha a linha sem carregar tudo na memória."""
-    def __init__(self, path):
-        self.path = path
-        self.file = open(path, "rb")
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        line = self.file.readline()
-        if not line:
-            raise StopIteration
-        return line.replace(b"\x00", b"").decode("latin-1", errors="replace")
-
-    def read(self, size=-1):
-        # COPY ... FROM STDIN sometimes calls read()
-        chunk = self.file.read(size)
-        if not chunk:
-            return ''
-        return chunk.replace(b"\x00", b"").decode("latin-1", errors="replace")
-
-    def close(self):
-        self.file.close()
 
 def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
     if not arquivos_empresa:
@@ -603,7 +708,7 @@ def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
             try:
                 cur.execute("TRUNCATE empresa_tmp;")
 
-                stream = StreamingTextIO(caminho)
+                stream = StreamingTextIO(caminho, label=f"EMPRESA {arquivo}")
                 cur.copy_expert(copy_sql, stream)
                 stream.close()
 
@@ -670,7 +775,7 @@ def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arq
             try:
                 cur.execute(f"TRUNCATE {temp_table_name};")
 
-                stream = StreamingTextIO(caminho)
+                stream = StreamingTextIO(caminho, label=f"{log_label} {arquivo}")
                 cur.copy_expert(copy_sql, stream)
                 stream.close()
 

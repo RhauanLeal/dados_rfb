@@ -158,50 +158,47 @@ deactivate
 ### No Windows
 
 * execute Ambiente virtual `.\venv\Scripts\activate` depois o arquivo `python etl_rfb_dados.py --etl` e aguarde a finalização do processo.
+  
+ - executando no docker pelo terminal
+docker exec -d dados_rfb-etl python etl_rfb_dados.py --etl
 
-- para acompanhar a execução em tempo real veja o arquivo em `dados_rfb\logs\etl_rfb_dados_log.txt`
+ - para acompanhar a execução em tempo real veja o arquivo 
+docker exec dados_rfb-etl tail -f /code/logs/etl_rfb_dados_log.txt
+
+ - Ver os processos no docker do windows
+docker exec dados_rfb-etl ps aux | Select-String python
+
+ - Matar o processo no docker do windows
+docker exec dados_rfb-etl kill PID
+
 
 # Bonus Docker!
 
 # 1. Construa a imagem
-
 docker compose build --no-cache
 
 # 4. Suba o container
-
 docker compose up -d
 
 # 5. Verifique se está rodando - Deve mostrar status "Up"
-
 docker ps
 
 # 6. Agora execute o ETL
 
-# Executar o script ETL (tem que esperar com o terminal aberto...)
-
+ - Executar o script ETL, se fechar o terminal ele não para pq ta dentro do docker
 docker exec -it dados_rfb-etl python etl_rfb_dados.py --etl
 
-# Ou em segundo plano
-
+ - Sempre execute assim em segundo plano dentro do docker, não exibe docker logs
 docker exec -d dados_rfb-etl python etl_rfb_dados.py --etl
 
-# ver Logs
+# e acompanhe os logs:
+docker logs -f dados_rfb-etl
 
-docker exec dados_rfb-etl cat /code/logs/etl_rfb_dados_log.txt
-
-ou tem tempor real
-
+# ou tem tempor real:
 docker exec dados_rfb-etl tail -f /code/logs/etl_rfb_dados_log.txt
 
 # Acessar o container para debug
-
 docker exec -it dados_rfb-etl bash
-
-# Ver logs do container
-docker logs dados_rfb-etl
-
-# Seguir logs em tempo real (como tail -f)
-docker logs -f dados_rfb-etl
 
 # Ver últimas linhas
 docker logs --tail 50 dados_rfb-etl
@@ -215,9 +212,5 @@ docker logs -f -t --tail 100 dados_rfb-etl
 # Limpar a imagem antiga (opcional)
 docker rmi dados_rfb-etl
 
-# Construir com a nova sintaxe
-docker build --no-cache -t dados_rfb-etl .
-
 # !Parar o container
-
 docker compose down
