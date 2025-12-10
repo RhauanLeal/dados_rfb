@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import time
 import logging
 import shutil
 import requests
@@ -10,20 +11,11 @@ import pathlib
 import gc
 import pandas as pd
 import psycopg2
+from pathlib import Path
 from sqlalchemy import create_engine
 from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from bs4 import BeautifulSoup
 from datetime import datetime
-'''
-Sistema de importação dos dados abertos da Receita Federal do Brasil (RFB)
-* arquivos baixados via HTTP são armazenados localmente,
-* arquivos são extraídos de .zip para diretórios locais, possuem codificação UNIX(LF) e ANSI (latin-1),
-* arquivos extraídos via ETL são carregados via Pandas e inseridos em tabelas permanentes,
-* tabela info_dados mantém controle de versões (ano, mês, data_atualizacao),
-* logs são armazenados em arquivo e exibidos no console.
-* tratamento de erros e movimentação de arquivos com problemas para diretório específico.
-* finalizando a importação os arquivos baixados e extraídos são excluídos para economizar espaço em disco.
-'''
 
 # Garantir diretório de logs
 LOG_DIR = pathlib.Path("logs")
@@ -31,19 +23,17 @@ LOG_DIR.mkdir(exist_ok=True)
 
 # Criar arquivo de log com codificação UTF-8
 log_file = LOG_DIR / "etl_rfb_dados_log.txt"
-
-# Configuração básica para arquivo
 logging.basicConfig(
+    filename=log_file,
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    encoding="utf-8"
 )
 
-# Verificar se configurou corretamente
+# APENAS ADICIONE ESTA LINHA
+logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+
 logger = logging.getLogger(__name__)
 
 # Diretórios fixos para armazenar os arquivos
@@ -52,12 +42,7 @@ OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
 EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
 
-# Tamanho padrão de chunk para leitura dos arquivos grandes
-CHUNK_ROWS  = 1_000_000  # 1 milhão de linhas por chunk (leitura)
-CHUNK_TO_SQL= 10_000     # 10 mil linhas por insert no to_sql (insert)
-
-logger.info("\n ================================================================================")
-logger.info("Iniciando ETL - dados_rfb")
+logging.info("Iniciando ETL - dados_rfb")
 
 # carrega o arquivo de configuração .env
 # Caminho relativo, subindo um nível para acessar dados_rfb/.env
@@ -73,57 +58,12 @@ else:
     dotenv_path = find_dotenv(ENV_PATH_LOCAL)
 
 if not dotenv_path:
-    logger.error("Arquivo de configuração .env não encontrado no diretório do projeto.")
-    logger.info("ETL Finalizado.")
+    logging.error("Arquivo de configuração .env não encontrado no diretório do projeto.")
+    logging.info("ETL Finalizado.")
     sys.exit(1)
 
 # Carrega o arquivo
 load_dotenv(dotenv_path)
-
-def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
-    '''
-    Converte segundos em uma frase de Horas Minutos e Segundos
-
-    Exemplo:
-    - Entrada datetime: tempo_inicial = datetime.now(), tempo_final = datetime.now()
-    - Saída str: String com o a frase horas minutos e segundos.
-    '''
-    # Calcula a diferença entre as datas
-    diferenca = tempo_final - tempo_inicial
-    total_segundos = int(diferenca.total_seconds())
-
-    # Convertendo para horas, minutos e segundos
-    horas = total_segundos // 3600
-    minutos = (total_segundos % 3600) // 60
-    segundos = total_segundos % 60
-
-    # Criando as strings de cada componente
-    hora = ''
-    minuto = ''
-    segundo = ''
-
-    if horas == 1:
-        hora = f'{horas} hora'
-    elif horas > 1:
-        hora = f'{horas} horas'
-
-    if minutos == 1:
-        minuto = f'{minutos} minuto'
-    elif minutos > 1:
-        minuto = f'{minutos} minutos'
-
-    if segundos == 1:
-        segundo = f'{segundos} segundo'
-    elif segundos > 1:
-        segundo = f'{segundos} segundos'
-    elif segundos < 1:
-        segundo = f'{diferenca} segundos'
-
-    # Juntando os componentes não vazios
-    componentes = [hora, minuto, segundo]
-    tempo = ', '.join([comp for comp in componentes if comp])
-
-    return tempo
 
 
 def connect_db(autocommit=False):
@@ -137,9 +77,9 @@ def connect_db(autocommit=False):
 
     # AVISO: Verificar se a senha está em branco ou vazia
     if passw is None or passw.strip() == "":
-        logger.warning("⚠️  AVISO: A senha do banco de dados (DB_PASSWORD) está em branco ou vazia.")
-        logger.warning("Isso pode causar falhas de conexão se o PostgreSQL exigir autenticação.")
-        logger.warning("Verifique o arquivo .env e defina DB_PASSWORD=sua_senha")
+        logging.warning("⚠️  AVISO: A senha do banco de dados (DB_PASSWORD) está em branco ou vazia.")
+        logging.warning("Isso pode causar falhas de conexão se o PostgreSQL exigir autenticação.")
+        logging.warning("Verifique o arquivo .env e defina DB_PASSWORD=sua_senha")
         
         # Também exibe no console para alertar o usuário
         print("\n⚠️  AVISO CRÍTICO: DB_PASSWORD está vazia!")
@@ -148,15 +88,12 @@ def connect_db(autocommit=False):
 
     # Validação básica das variáveis obrigatórias
     if not all([user, host, database]):
-        logger.error("Erro: variáveis de ambiente DB_* incompletas no .env")
+        logging.error("Erro: variáveis de ambiente DB_* incompletas no .env")
         missing = []
-        if not user:
-            missing.append("DB_USER")
-        if not host:
-            missing.append("DB_HOST") 
-        if not database:
-            missing.append("DB_NAME")
-        logger.error(f"Variáveis faltando: {', '.join(missing)}")
+        if not user: missing.append("DB_USER")
+        if not host: missing.append("DB_HOST") 
+        if not database: missing.append("DB_NAME")
+        logging.error(f"Variáveis faltando: {', '.join(missing)}")
         raise ValueError(f"Configuração do banco incompleta. Variáveis faltando: {', '.join(missing)}")
 
     # Escapa caracteres especiais no usuário e senha
@@ -182,18 +119,18 @@ def connect_db(autocommit=False):
         if autocommit:
             conn.set_session(autocommit=True)
 
-        logger.info("✅ Conexão com o banco de dados estabelecida com sucesso")
+        logging.info("✅ Conexão com o banco de dados estabelecida com sucesso")
         return conn, engine
 
     except psycopg2.OperationalError as e:
-        logger.error(f"❌ Erro de conexão com o banco de dados: {e}")
+        logging.error(f"❌ Erro de conexão com o banco de dados: {e}")
         if "password authentication failed" in str(e):
-            logger.error("Falha na autenticação. Verifique a senha no arquivo .env")
+            logging.error("Falha na autenticação. Verifique a senha no arquivo .env")
         elif "database" in str(e).lower() and "does not exist" in str(e).lower():
-            logger.error("Banco de dados não existe. Execute o arquivo dados_rfb.sql primeiro")
+            logging.error("Banco de dados não existe. Execute o arquivo dados_rfb.sql primeiro")
         raise
     except Exception as e:
-        logger.error(f"❌ Erro inesperado na conexão: {e}")
+        logging.error(f"❌ Erro inesperado na conexão: {e}")
         raise
 
 
@@ -204,7 +141,7 @@ def verificar_nova_atualizacao():
     response = requests.get(base_url)
 
     if response.status_code != 200:
-        logger.error(f"Erro ao acessar {base_url}: código {response.status_code}")
+        logging.error(f"Erro ao acessar {base_url}: código {response.status_code}")
         return None
 
     # Parse do HTML
@@ -228,7 +165,7 @@ def verificar_nova_atualizacao():
                         continue
 
     if not datas:
-        logger.info("Nenhuma pasta válida encontrada no site da RFB.")
+        logging.info("Nenhuma pasta válida encontrada no site da RFB.")
         return None
     
     # Identifica a mais recente
@@ -253,7 +190,7 @@ def verificar_nova_atualizacao():
         conn.close()
 
         if existe:
-            logger.info("A versão mais recente já está registrada no banco de dados.")
+            logging.info("A versão mais recente já está registrada no banco de dados.")
             return None
 
     # Se não existir, retorna os dados para serem usados posteriormente
@@ -322,240 +259,230 @@ def criar_tabela_info_dados():
         """)
 
         conn.commit()
-        logger.info("Tabelas info_dados e estruturas criadas/verificadas com sucesso!")
+        logging.info("Tabelas info_dados e estruturas criadas/verificadas com sucesso!")
     conn.close()
-    return True
 
 
 # Cria as tabelas no banco de dados se elas não existirem.
-def create_tables():
+def create_tables(conn):
     """
     Cria tabelas de forma segura, evitando conflitos com tipos
     """
-    # Conectar ao banco de dados
-    conn, engine = connect_db()
-    try:
-        with conn.cursor() as cur:
-            try:
-                # Tenta criar as tabelas normalmente
-                cur.execute("""
-                -- Tabela: cnae
-                CREATE TABLE IF NOT EXISTS public.cnae (
-                    codigo text PRIMARY KEY,
-                    descricao text
-                );
+    with conn.cursor() as cur:
+        try:
+            # Tenta criar as tabelas normalmente
+            cur.execute("""
+            -- Tabela: cnae
+            CREATE TABLE IF NOT EXISTS public.cnae (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-                -- Tabela: empresa
-                CREATE TABLE IF NOT EXISTS public.empresa (
-                    cnpj_basico text PRIMARY KEY,
-                    razao_social text,
-                    natureza_juridica text,
-                    qualificacao_responsavel text,
-                    capital_social double precision,
-                    porte_empresa text,
-                    ente_federativo_responsavel text
-                );
-                            
-                -- Tabela: empresa_porte
-                CREATE TABLE IF NOT EXISTS empresa_porte (
-                    codigo INTEGER PRIMARY KEY,
-                    descricao TEXT
-                );
+            -- Tabela: empresa
+            CREATE TABLE IF NOT EXISTS public.empresa (
+                cnpj_basico text PRIMARY KEY,
+                razao_social text,
+                natureza_juridica text,
+                qualificacao_responsavel text,
+                capital_social double precision,
+                porte_empresa text,
+                ente_federativo_responsavel text
+            );
+                        
+            -- Tabela: empresa_porte
+            CREATE TABLE IF NOT EXISTS empresa_porte (
+                codigo INTEGER PRIMARY KEY,
+                descricao TEXT
+            );
 
-                -- Tabela: estabelecimento
-                CREATE TABLE IF NOT EXISTS public.estabelecimento (
-                    cnpj_basico text,
-                    cnpj_ordem text,
-                    cnpj_dv text,
-                    identificador_matriz_filial text,
-                    nome_fantasia text,
-                    situacao_cadastral text,
-                    data_situacao_cadastral text,
-                    motivo_situacao_cadastral text,
-                    nome_cidade_exterior text,
-                    pais text,
-                    data_inicio_atividade text,
-                    cnae_fiscal_principal text,
-                    cnae_fiscal_secundaria text,
-                    tipo_logradouro text,
-                    logradouro text,
-                    numero text,
-                    complemento text,
-                    bairro text,
-                    cep text,
-                    uf text,
-                    municipio text,
-                    ddd_1 text,
-                    telefone_1 text,
-                    ddd_2 text,
-                    telefone_2 text,
-                    ddd_fax text,
-                    fax text,
-                    correio_eletronico text,
-                    situacao_especial text,
-                    data_situacao_especial text,
-                    PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
-                );
-                            
-                -- Tabela: estabelecimento_situacao_cadastral
-                CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (
-                    codigo INTEGER PRIMARY KEY,
-                    descricao TEXT
-                );
-                            
-                -- Tabela: moti
-                CREATE TABLE IF NOT EXISTS public.moti (
-                    codigo text PRIMARY KEY,
-                    descricao text
-                );
+            -- Tabela: estabelecimento
+            CREATE TABLE IF NOT EXISTS public.estabelecimento (
+                cnpj_basico text,
+                cnpj_ordem text,
+                cnpj_dv text,
+                identificador_matriz_filial text,
+                nome_fantasia text,
+                situacao_cadastral text,
+                data_situacao_cadastral text,
+                motivo_situacao_cadastral text,
+                nome_cidade_exterior text,
+                pais text,
+                data_inicio_atividade text,
+                cnae_fiscal_principal text,
+                cnae_fiscal_secundaria text,
+                tipo_logradouro text,
+                logradouro text,
+                numero text,
+                complemento text,
+                bairro text,
+                cep text,
+                uf text,
+                municipio text,
+                ddd_1 text,
+                telefone_1 text,
+                ddd_2 text,
+                telefone_2 text,
+                ddd_fax text,
+                fax text,
+                correio_eletronico text,
+                situacao_especial text,
+                data_situacao_especial text,
+                PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
+            );
+                        
+            -- Tabela: estabelecimento_situacao_cadastral
+            CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (
+                codigo INTEGER PRIMARY KEY,
+                descricao TEXT
+            );
+                        
+            -- Tabela: moti
+            CREATE TABLE IF NOT EXISTS public.moti (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-                -- Tabela: munic
-                CREATE TABLE IF NOT EXISTS public.munic (
-                    codigo text PRIMARY KEY,
-                    descricao text
-                );
+            -- Tabela: munic
+            CREATE TABLE IF NOT EXISTS public.munic (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-                -- Tabela: natju
-                CREATE TABLE IF NOT EXISTS public.natju (
-                    codigo text PRIMARY KEY,
-                    descricao text
-                );
+            -- Tabela: natju
+            CREATE TABLE IF NOT EXISTS public.natju (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-                -- Tabela: pais
-                CREATE TABLE IF NOT EXISTS public.pais (
-                    codigo text PRIMARY KEY,
-                    descricao text
-                );
+            -- Tabela: pais
+            CREATE TABLE IF NOT EXISTS public.pais (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-                -- Tabela: quals
-                CREATE TABLE IF NOT EXISTS public.quals (
-                    codigo text PRIMARY KEY,
-                    descricao text
-                );
+            -- Tabela: quals
+            CREATE TABLE IF NOT EXISTS public.quals (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
 
-                -- Tabela: simples
-                CREATE TABLE IF NOT EXISTS public.simples (
-                    cnpj_basico text PRIMARY KEY,
-                    opcao_pelo_simples text,
-                    data_opcao_simples text,
-                    data_exclusao_simples text,
-                    opcao_mei text,
-                    data_opcao_mei text,
-                    data_exclusao_mei text
-                );
+            -- Tabela: simples
+            CREATE TABLE IF NOT EXISTS public.simples (
+                cnpj_basico text PRIMARY KEY,
+                opcao_pelo_simples text,
+                data_opcao_simples text,
+                data_exclusao_simples text,
+                opcao_mei text,
+                data_opcao_mei text,
+                data_exclusao_mei text
+            );
 
-                -- Tabela: socios
-                CREATE TABLE IF NOT EXISTS public.socios (
-                    cnpj_basico text PRIMARY KEY,
-                    identificador_socio text,
-                    nome_socio_razao_social text,
-                    cpf_cnpj_socio text,
-                    qualificacao_socio text,
-                    data_entrada_sociedade text,
-                    pais text,
-                    representante_legal text,
-                    nome_do_representante text,
-                    qualificacao_representante_legal text,
-                    faixa_etaria text
-                );
+            -- Tabela: socios
+            CREATE TABLE IF NOT EXISTS public.socios (
+                cnpj_basico text PRIMARY KEY,
+                identificador_socio text,
+                nome_socio_razao_social text,
+                cpf_cnpj_socio text,
+                qualificacao_socio text,
+                data_entrada_sociedade text,
+                pais text,
+                representante_legal text,
+                nome_do_representante text,
+                qualificacao_representante_legal text,
+                faixa_etaria text
+            );
 
-                -- Tabela: socios_identificador
-                CREATE TABLE IF NOT EXISTS socios_identificador (
-                    codigo INTEGER PRIMARY KEY,
-                    descricao TEXT
-                );
-                """)
+            -- Tabela: socios_identificador
+            CREATE TABLE IF NOT EXISTS socios_identificador (
+                codigo INTEGER PRIMARY KEY,
+                descricao TEXT
+            );
+            """)
+            
+            # Inserts separados para evitar conflitos
+            cur.execute("""
+            INSERT INTO empresa_porte (codigo, descricao) VALUES
+                (1, 'Microempresa'),
+                (3, 'Empresa de Pequeno Porte'),
+                (5, 'Demais')
+            ON CONFLICT (codigo) DO NOTHING;
+            """)
+            
+            cur.execute("""
+            INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES
+                (1, 'Nula'),
+                (2, 'Ativa'),
+                (3, 'Suspensa'),
+                (4, 'Inapta'),
+                (5, 'Ativa Não Regular'),
+                (8, 'Baixada')
+            ON CONFLICT (codigo) DO NOTHING;
+            """)
+            
+            cur.execute("""
+            INSERT INTO socios_identificador (codigo, descricao) VALUES
+                (1, 'Pessoa Jurídica'),
+                (2, 'Pessoa Física'),
+                (3, 'Sócio Estrangeiro')
+            ON CONFLICT (codigo) DO NOTHING;
+            """)
+            
+            conn.commit()
+            logging.info("Tabelas criadas/verificadas com sucesso!")
+            
+        except psycopg2.errors.UniqueViolation as e:
+            if 'pg_type_typname_nsp_index' in str(e):
+                logging.warning("Conflito de tipo detectado. Fazendo rollback e tentando abordagem alternativa...")
+                conn.rollback()
                 
-                # Inserts separados para evitar conflitos
-                cur.execute("""
-                INSERT INTO empresa_porte (codigo, descricao) VALUES
-                    (1, 'Microempresa'),
-                    (3, 'Empresa de Pequeno Porte'),
-                    (5, 'Demais')
-                ON CONFLICT (codigo) DO NOTHING;
-                """)
+                # Abordagem alternativa: criar tabelas uma por uma
+                tables_sql = [
+                    """CREATE TABLE IF NOT EXISTS public.cnae (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text PRIMARY KEY, razao_social text, natureza_juridica text, qualificacao_responsavel text, capital_social double precision, porte_empresa text, ente_federativo_responsavel text);""",
+                    """CREATE TABLE IF NOT EXISTS empresa_porte (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
+                    """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial text, nome_fantasia text, situacao_cadastral text, data_situacao_cadastral text, motivo_situacao_cadastral text, nome_cidade_exterior text, pais text, data_inicio_atividade text, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio text, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial text, PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv));""",
+                    """CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
+                    """CREATE TABLE IF NOT EXISTS public.moti (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.munic (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.natju (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.pais (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.quals (codigo text PRIMARY KEY, descricao text);""",
+                    """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text PRIMARY KEY, opcao_pelo_simples text, data_opcao_simples text, data_exclusao_simples text, opcao_mei text, data_opcao_mei text, data_exclusao_mei text);""",
+                    """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text PRIMARY KEY, identificador_socio text, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio text, data_entrada_sociedade text, pais text, representante_legal text, nome_do_representante text, qualificacao_representante_legal text, faixa_etaria text);""",
+                    """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao TEXT);"""
+                ]
                 
-                cur.execute("""
-                INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES
-                    (1, 'Nula'),
-                    (2, 'Ativa'),
-                    (3, 'Suspensa'),
-                    (4, 'Inapta'),
-                    (5, 'Ativa Não Regular'),
-                    (8, 'Baixada')
-                ON CONFLICT (codigo) DO NOTHING;
-                """)
-                
-                cur.execute("""
-                INSERT INTO socios_identificador (codigo, descricao) VALUES
-                    (1, 'Pessoa Jurídica'),
-                    (2, 'Pessoa Física'),
-                    (3, 'Sócio Estrangeiro')
-                ON CONFLICT (codigo) DO NOTHING;
-                """)
-                
-                conn.commit()
-                logger.info("Tabelas criadas/verificadas com sucesso!")
-                
-            except psycopg2.errors.UniqueViolation as e:
-                if 'pg_type_typname_nsp_index' in str(e):
-                    logger.warning("Conflito de tipo detectado. Fazendo rollback e tentando abordagem alternativa...")
-                    conn.rollback()
-                    
-                    # Abordagem alternativa: criar tabelas uma por uma
-                    tables_sql = [
-                        """CREATE TABLE IF NOT EXISTS public.cnae (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text PRIMARY KEY, razao_social text, natureza_juridica text, qualificacao_responsavel text, capital_social double precision, porte_empresa text, ente_federativo_responsavel text);""",
-                        """CREATE TABLE IF NOT EXISTS empresa_porte (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial text, nome_fantasia text, situacao_cadastral text, data_situacao_cadastral text, motivo_situacao_cadastral text, nome_cidade_exterior text, pais text, data_inicio_atividade text, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio text, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial text, PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv));""",
-                        """CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.moti (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.munic (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.natju (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.pais (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.quals (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text PRIMARY KEY, opcao_pelo_simples text, data_opcao_simples text, data_exclusao_simples text, opcao_mei text, data_opcao_mei text, data_exclusao_mei text);""",
-                        """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text PRIMARY KEY, identificador_socio text, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio text, data_entrada_sociedade text, pais text, representante_legal text, nome_do_representante text, qualificacao_representante_legal text, faixa_etaria text);""",
-                        """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao TEXT);"""
-                    ]
-                    
-                    for sql in tables_sql:
-                        try:
-                            cur.execute(sql)
-                            conn.commit()
-                        except psycopg2.errors.DuplicateTable:
-                            conn.rollback()
-                            logger.info("Tabela já existe, continuando...")
-                        except psycopg2.errors.UniqueViolation:
-                            conn.rollback()
-                            logger.info("Conflito de tipo ignorado, continuando...")
-                        except Exception as e:
-                            conn.rollback()
-                            logger.warning(f"Erro ao criar tabela: {e}, continuando...")
-                    
-                    # Inserts após criar todas as tabelas
+                for sql in tables_sql:
                     try:
-                        cur.execute("INSERT INTO empresa_porte (codigo, descricao) VALUES (1, 'Microempresa'), (3, 'Empresa de Pequeno Porte'), (5, 'Demais') ON CONFLICT (codigo) DO NOTHING;")
-                        cur.execute("INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES (1, 'Nula'), (2, 'Ativa'), (3, 'Suspensa'), (4, 'Inapta'), (5, 'Ativa Não Regular'), (8, 'Baixada') ON CONFLICT (codigo) DO NOTHING;")
-                        cur.execute("INSERT INTO socios_identificador (codigo, descricao) VALUES (1, 'Pessoa Jurídica'), (2, 'Pessoa Física'), (3, 'Sócio Estrangeiro') ON CONFLICT (codigo) DO NOTHING;")
+                        cur.execute(sql)
                         conn.commit()
+                    except psycopg2.errors.DuplicateTable:
+                        conn.rollback()
+                        logging.info("Tabela já existe, continuando...")
+                    except psycopg2.errors.UniqueViolation:
+                        conn.rollback()
+                        logging.info("Conflito de tipo ignorado, continuando...")
                     except Exception as e:
                         conn.rollback()
-                        logger.warning(f"Erro nos inserts: {e}")
-                    
-                    logger.info("Tabelas criadas/verificadas com abordagem alternativa!")
-                else:
-                    raise e
-    # fecha a conexão
-    finally:
-        conn.close()
-        engine.dispose()
+                        logging.warning(f"Erro ao criar tabela: {e}, continuando...")
+                
+                # Inserts após criar todas as tabelas
+                try:
+                    cur.execute("INSERT INTO empresa_porte (codigo, descricao) VALUES (1, 'Microempresa'), (3, 'Empresa de Pequeno Porte'), (5, 'Demais') ON CONFLICT (codigo) DO NOTHING;")
+                    cur.execute("INSERT INTO estabelecimento_situacao_cadastral (codigo, descricao) VALUES (1, 'Nula'), (2, 'Ativa'), (3, 'Suspensa'), (4, 'Inapta'), (5, 'Ativa Não Regular'), (8, 'Baixada') ON CONFLICT (codigo) DO NOTHING;")
+                    cur.execute("INSERT INTO socios_identificador (codigo, descricao) VALUES (1, 'Pessoa Jurídica'), (2, 'Pessoa Física'), (3, 'Sócio Estrangeiro') ON CONFLICT (codigo) DO NOTHING;")
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    logging.warning(f"Erro nos inserts: {e}")
+                
+                logging.info("Tabelas criadas/verificadas com abordagem alternativa!")
+            else:
+                raise e
 
 
 # insere os dados na tabela info_dados
-def inserir_info_dados(info):
-    # Reabre conexão para próximo bloco
-    conn, engine = connect_db()
+def inserir_info_dados(conn, info):
     cur = conn.cursor()
 
     cur.execute("""
@@ -566,10 +493,7 @@ def inserir_info_dados(info):
     """, (info['ano'], info['mes'], info['data_atualizacao']))
 
     conn.commit()
-    logger.info(f"Atualização inserida no banco: {info['ano']}-{info['mes']:02d}")
-    
-    cur.close() # Fecha a conexão com o banco
-    conn.close() # Fecha a conexão com o banco
+    logging.info(f"Atualização inserida no banco: {info['ano']}-{info['mes']:02d}")
 
 
 # traz a lista de arquivos da url
@@ -579,18 +503,18 @@ def get_files(base_url):
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        logger.info(f"Baixando arquivos do mês: {base_url}")
+        logging.info(f"Baixando arquivos do mês: {base_url}")
 
         # Identificar arquivos ZIP disponíveis para download
         files = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".zip")]
 
         if not files:
-            logger.info("Nenhum arquivo .zip encontrado para o mês atual.")
+            logging.info("Nenhum arquivo .zip encontrado para o mês atual.")
             return []
 
         return sorted(files)
     else:
-        logger.error(f'Erro ao acessar {base_url}: código {response.status_code}')
+        logging.error(f'Erro ao acessar {base_url}: código {response.status_code}')
         return []
 
 
@@ -603,7 +527,7 @@ def check_diff(url, file_name):
         response = requests.head(url, timeout=10)
         new_size = int(response.headers.get("content-length", 0))
     except Exception as e:
-        logger.warning(f"Erro ao verificar cabeçalho de {url}: {e}")
+        logging.warning(f"Erro ao verificar cabeçalho de {url}: {e}")
         return True
 
     old_size = os.path.getsize(file_name)
@@ -620,22 +544,22 @@ def download_file(url, output_path):
     file_name = os.path.join(output_path, url.split("/")[-1])
 
     if not check_diff(url, file_name):
-            logger.info(f"Arquivo {file_name} já está atualizado.")
+            logging.info(f"Arquivo {file_name} já está atualizado.")
             return file_name
     
-    logger.info(f"Baixando {file_name}...")
+    logging.info(f"Baixando {file_name}...")
     
     with open(file_name, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
 
-    logger.info(f"Download concluído para {file_name}")
+    logging.info(f"Download concluído para {file_name}")
     return file_name
 
 
 # Função para extrair arquivos ZIP
 def extract_files(zip_path, extract_to):
-    logger.info(f"Extraindo {zip_path} para {extract_to}...")
+    logging.info(f"Extraindo {zip_path} para {extract_to}...")
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(extract_to)
 
@@ -646,7 +570,7 @@ def criar_indices():
         conn, _ = connect_db(autocommit=True)  # <- agora com autocommit
         cur = conn.cursor()
 
-        logger.info("Iniciando criação dos índices...")
+        logging.info("Iniciando criação dos índices...")
 
         indices = [
             ("empresa", "cnpj_basico"),
@@ -660,27 +584,25 @@ def criar_indices():
             try:
                 sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
                 cur.execute(sql)
-                logger.info(f"Índice {nome_indice} criado com sucesso.")
+                logging.info(f"Índice {nome_indice} criado com sucesso.")
             except Exception as e:
-                logger.error(f"Erro ao criar o índice {nome_indice}: {e}", exc_info=True)
+                logging.error(f"Erro ao criar o índice {nome_indice}: {e}", exc_info=True)
 
         cur.close()
         conn.close()
         gc.collect()
-        logger.info("Criação dos índices finalizada.")
+        logging.info("Criação dos índices finalizada.")
 
     except Exception as e:
-        logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
-        logger.critical("Não foi possível iniciar o aplicativo")
-        sys.exit(1)
+        logging.error(f"Erro geral ao criar índices: {e}", exc_info=True)
 
 
 def move_file_error(extracted_file_path, arquivo):
     try:
         shutil.move(extracted_file_path, ERRO_FILES_PATH / arquivo)
-        logger.info(f"Arquivo {arquivo} movido para a pasta de erro: {ERRO_FILES_PATH}")
+        logging.info(f"Arquivo {arquivo} movido para a pasta de erro: {ERRO_FILES_PATH}")
     except Exception as move_err:
-        logger.error(f"Erro ao mover o arquivo {arquivo} para a pasta erro: {move_err}")
+        logging.error(f"Erro ao mover o arquivo {arquivo} para a pasta erro: {move_err}")
 
 
 # Função principal do ETL
@@ -691,24 +613,15 @@ def etl_process():
         EXTRACTED_FILES_PATH.mkdir(parents=True, exist_ok=True)
         ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Extraídos: {EXTRACTED_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
+        logging.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Extraídos: {EXTRACTED_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
 
-        start_time = datetime.now()
+        start_time = time.time()
 
         info = verificar_nova_atualizacao()
-        if not info:
-            logger.info("Nenhuma atualização nova encontrada. Encerrando.")
-            return
-        
-        logger.info(f"Nova atualização encontrada: {info['ano']}-{info['mes']:02d} em {info['data_atualizacao']}")
-        logger.info(f"URL base para download: {info['url']}")
         
         files = get_files(info['url'])
-        if not files:
-            logger.info("Nenhum arquivo .zip para processar. Encerrando.")
-            return
 
-        logger.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
+        logging.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
 
         # Baixar arquivos
         zip_files = [download_file(info['url'] + file, OUTPUT_FILES_PATH) for file in files]
@@ -717,7 +630,14 @@ def etl_process():
         for zip_file in zip_files:
             extract_files(zip_file, EXTRACTED_FILES_PATH)
 
-        logger.info("Todos os arquivos foram baixados e extraídos. Iniciando processamento dos dados.")
+        logging.info("Todos os arquivos foram baixados e extraídos. Iniciando processamento dos dados.")
+        
+        # Conectar ao banco de dados
+        conn, engine = connect_db()
+        cur = conn.cursor()
+
+        # Criar tabelas antes de inserir dados
+        create_tables(conn)
         
         # Processar os arquivos após download completo
         arquivos_empresa = []
@@ -768,23 +688,16 @@ def etl_process():
         arquivos_pais.sort()
         arquivos_quals.sort()
         
-        # Criar tabelas antes de inserir dados
-        create_tables()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
-
         # Começa arquivos_empresa
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "empresa" ;')
         conn.commit()
         for arquivo in arquivos_empresa:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -795,8 +708,7 @@ def etl_process():
                                                     header=None,
                                                     dtype=empresa_dtypes,
                                                     encoding='latin-1',
-                                                    chunksize=CHUNK_ROWS,
-                                                    )):
+                                                    chunksize=2_000_000)):
 
                     chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
 
@@ -809,20 +721,13 @@ def etl_process():
                     chunk['capital_social'] = chunk['capital_social'].apply(tratar_capital)
                     
                     try:
-                        chunk.to_sql(
-                            name='empresa', 
-                            con=engine, 
-                            if_exists='append', 
-                            index=False, 
-                            chunksize=CHUNK_TO_SQL,
-                            method='multi'
-                            )
-                        logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso!")
+                        chunk.to_sql(name='empresa', con=engine, if_exists='append', index=False, chunksize=10_000)
+                        logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso!")
                     except Exception as e:
-                        logger.error(f"Erro ao inserir chunk {i} do arquivo {arquivo}: {e}")
+                        logging.error(f"Erro ao inserir chunk {i} do arquivo {arquivo}: {e}")
                         try:
                             conn.rollback()
-                            logger.warning("Rollback realizado. Tentando inserir novamente o chunk...")
+                            logging.warning("Rollback realizado. Tentando inserir novamente o chunk...")
 
                             # Tenta de novo
                             chunk.to_sql(
@@ -830,16 +735,15 @@ def etl_process():
                                 con=engine,
                                 if_exists='append',
                                 index=False,
-                                chunksize=CHUNK_TO_SQL,
-                                method='multi'
+                                chunksize=10_000
                             )
-                            logger.info(f"Chunk {i} reprocessado com sucesso!")
+                            logging.info(f"Chunk {i} reprocessado com sucesso!")
                         except Exception as segunda_falha:
-                            logger.error(f"Falha novamente ao reprocessar chunk {i}: {segunda_falha}")
+                            logging.error(f"Falha novamente ao reprocessar chunk {i}: {segunda_falha}")
                             break  # desiste desse arquivo
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
@@ -848,34 +752,18 @@ def etl_process():
                     del chunk
                 gc.collect()
 
-        logger.info("Arquivos de empresa finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
+        logging.info("Arquivos de empresa finalizados!")
 
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
-
+        # Começa arquivos_estabelecimento
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "estabelecimento" ;')
         conn.commit()
         for arquivo in arquivos_estabelecimento:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
             
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -893,7 +781,7 @@ def etl_process():
                     header=None,
                     dtype=estabelecimento_dtypes,
                     encoding='latin-1',
-                    chunksize=CHUNK_ROWS,
+                    chunksize=2_000_000
                 )):
 
                     chunk.columns = [
@@ -912,14 +800,13 @@ def etl_process():
                         con=engine,
                         if_exists='append',
                         index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
+                        chunksize=10_000
                     )
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
 
             finally:
@@ -927,34 +814,18 @@ def etl_process():
                     del chunk
                 gc.collect()
 
-        logger.info("Arquivos de estabelecimento finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
+        logging.info("Arquivos de estabelecimento finalizados!")
 
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
-
+        # Arquivos de socios:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "socios" ;')
         conn.commit()
         for arquivo in arquivos_socios:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -970,7 +841,7 @@ def etl_process():
                     header=None,
                     dtype=socios_dtypes,
                     encoding='latin-1',
-                    chunksize=CHUNK_ROWS,
+                    chunksize=2_000_000
                 )):
                     # Renomear colunas
                     chunk.columns = [
@@ -993,14 +864,13 @@ def etl_process():
                         con=engine,
                         if_exists='append',
                         index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
+                        chunksize=10_000
                     )
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
@@ -1009,34 +879,18 @@ def etl_process():
                     del chunk
                 gc.collect()
 
-        logger.info("Arquivos de socios finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
+        logging.info("Arquivos de socios finalizados!")
 
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
-
+        # Arquivos de simples:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "simples" ;')
         conn.commit()
         for arquivo in arquivos_simples:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1056,7 +910,7 @@ def etl_process():
                     header=None,
                     dtype=simples_dtypes,
                     encoding='latin-1',
-                    chunksize=CHUNK_ROWS,
+                    chunksize=2_000_000
                 )):
                     # Renomear colunas
                     chunk.columns = [
@@ -1075,50 +929,32 @@ def etl_process():
                         con=engine,
                         if_exists='append',
                         index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
+                        chunksize=10_000
                     )
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    logging.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
-
             finally:
                 if 'chunk' in locals():
                     del chunk
                 gc.collect()
 
-        logger.info("Arquivos do simples finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
+        logging.info("Arquivos do simples finalizados!")
 
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
-
+        # Arquivos de cnae:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "cnae" ;')
         conn.commit()
         for arquivo in arquivos_cnae:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1139,50 +975,32 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
+                    chunksize=10_000
                 )
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
-
             finally:
                 if 'cnae' in locals():
                     del cnae
                 gc.collect()
 
-        logger.info("Arquivos de cnae finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
+        logging.info("Arquivos de cnae finalizados!")
 
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
-
+        # Arquivos de moti:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "moti" ;')
         conn.commit()
         for arquivo in arquivos_moti:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1208,51 +1026,32 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
+                    chunksize=10_000
                 )
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
-
             finally:
                 if 'moti' in locals():
                     del moti
                 gc.collect()
 
-        logger.info("Arquivos de moti finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
+        logging.info("Arquivos de moti finalizados!")
 
         # Arquivos de munic:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "munic" ;')
         conn.commit()
         for arquivo in arquivos_munic:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1278,51 +1077,32 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
+                    chunksize=10_000
                 )
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
-
             finally:
                 if 'munic' in locals():
                     del munic
                 gc.collect()
 
-        logger.info("Arquivos de munic finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
+        logging.info("Arquivos de munic finalizados!")
 
         # Arquivos de natju:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "natju" ;')
         conn.commit()
         for arquivo in arquivos_natju:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1348,51 +1128,32 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
+                    chunksize=10_000
                 )
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
-
             finally:
                 if 'natju' in locals():
                     del natju
                 gc.collect()
 
-        logger.info("Arquivos de natju finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
+        logging.info("Arquivos de natju finalizados!")
 
         # Arquivos de pais:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "pais" ;')
         conn.commit()
         for arquivo in arquivos_pais:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1418,51 +1179,32 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
+                    chunksize=10_000
                 )
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
-
             finally:
                 if 'pais' in locals():
                     del pais
                 gc.collect()
 
-        logger.info("Arquivos de pais finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
+        logging.info("Arquivos de pais finalizados!")
 
         # Arquivos de qualificação de sócios:
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "quals" ;')
         conn.commit()
         for arquivo in arquivos_quals:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            logging.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
             if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                logging.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
             try:
@@ -1488,51 +1230,41 @@ def etl_process():
                     con=engine,
                     if_exists='append',
                     index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
+                    chunksize=10_000
                 )
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                logging.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logging.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
-
             finally:
                 if 'quals' in locals():
                     del quals
                 gc.collect()
-        
-        logger.info("Arquivos de quals finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
 
         # Grava os dados e gera um txt com os arquivos com erro
         if arquivos_com_erro:
-            logger.warning(f"Arquivos com erro: {arquivos_com_erro}")
-            logger.warning(f"Arquivos com erro foram movidos para: {ERRO_FILES_PATH}")
-           
+            logging.warning(f"Arquivos com erro: {arquivos_com_erro}")
+            
             with open("arquivos_com_erro.txt", "w", encoding="utf-8") as f:
                 for nome in arquivos_com_erro:
                     f.write(nome + "\n")
-        
+            for arquivo in arquivos_com_erro:
+                # Move os arquivos com erro para uma subpasta chamada erro/ para facilitar o controle:
+                shutil.move(extracted_file_path, ERRO_FILES_PATH / arquivo)
+
         # Inserir os dados da ultima atualização na tabela info_dados
-        inserir_info_dados(info)
+        inserir_info_dados(conn, info)
+
+        cur.close() # Fecha a conexão com o banco
+        conn.close() # Fecha a conexão com o banco
+
+        logging.info("Arquivos de quals finalizados!")
 
         # Processo de inserção finalizado
-        logger.info('Processo de carga dos arquivos finalizado!')
+        logging.info('Processo de carga dos arquivos finalizado!')
 
         # Criação dos índices
         criar_indices()
@@ -1540,14 +1272,13 @@ def etl_process():
         # Remover arquivos após a inserção no banco
         shutil.rmtree(OUTPUT_FILES_PATH)
         shutil.rmtree(EXTRACTED_FILES_PATH)
-        logger.info("Arquivos removidos após a carga no banco.")
+        logging.info("Arquivos removidos após a carga no banco.")
 
-        logger.info(f"ETL concluído com sucesso em {converter_segundos(start_time, datetime.now())}")
+        total_time = time.time() - start_time
+        logging.info(f"ETL concluído com sucesso em {total_time:.2f} segundos!")
 
     except Exception as e:
-        logger.error(f"Erro no processo ETL: {e}", exc_info=True)
-        logger.critical("Não foi possível iniciar o aplicativo")
-        sys.exit(1)
+        logging.error(f"Erro no processo ETL: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
