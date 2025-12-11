@@ -53,7 +53,7 @@ EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
 
 # Tamanho padrão de chunk para leitura dos arquivos grandes
-CHUNK_ROWS  = 1_000_000  # 1 milhão de linhas por chunk (leitura)
+CHUNK_ROWS  = 2_000_000  # 1 milhão de linhas por chunk (leitura)
 CHUNK_TO_SQL= 10_000     # 10 mil linhas por insert no to_sql (insert)
 
 logger.info("\n ================================================================================")
