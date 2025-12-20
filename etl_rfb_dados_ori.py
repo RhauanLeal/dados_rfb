@@ -90,9 +90,12 @@ def connect_db(autocommit=False):
     if not all([user, host, database]):
         logging.error("Erro: variáveis de ambiente DB_* incompletas no .env")
         missing = []
-        if not user: missing.append("DB_USER")
-        if not host: missing.append("DB_HOST") 
-        if not database: missing.append("DB_NAME")
+        if not user:
+            missing.append("DB_USER")
+        if not host: 
+            missing.append("DB_HOST") 
+        if not database: 
+            missing.append("DB_NAME")
         logging.error(f"Variáveis faltando: {', '.join(missing)}")
         raise ValueError(f"Configuração do banco incompleta. Variáveis faltando: {', '.join(missing)}")
 
