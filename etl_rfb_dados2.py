@@ -179,30 +179,6 @@ class StreamingTextIO:
     def close(self):
         self.file.close()
 
-# class StreamingTextIO:
-#     """Abstração para COPY EXPERT ler linha a linha sem carregar tudo na memória."""
-#     def __init__(self, path):
-#         self.path = path
-#         self.file = open(path, "rb")
-
-#     def __iter__(self):
-#         return self
-
-#     def __next__(self):
-#         line = self.file.readline()
-#         if not line:
-#             raise StopIteration
-#         return line.replace(b"\x00", b"").decode("latin-1", errors="replace")
-
-#     def read(self, size=-1):
-#         # COPY ... FROM STDIN sometimes calls read()
-#         chunk = self.file.read(size)
-#         if not chunk:
-#             return ''
-#         return chunk.replace(b"\x00", b"").decode("latin-1", errors="replace")
-
-#     def close(self):
-#         self.file.close()
 
 def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
     diferenca = tempo_final - tempo_inicial
@@ -276,6 +252,7 @@ def criar_tabela_info_dados():
     conn = connect_db()
     try:
         with conn.cursor() as cur:
+            cur.execute("SET synchronous_commit = OFF;")
             cur.execute(
                 """
             CREATE TABLE IF NOT EXISTS info_dados (
@@ -382,6 +359,7 @@ def verificar_nova_atualizacao():
     conn = connect_db()
     try:
         with conn.cursor() as cur:
+            cur.execute("SET synchronous_commit = OFF;")
             cur.execute(
                 """
             SELECT 1
@@ -489,6 +467,7 @@ def create_base_tables(conn):
     logger.info("Criando/recriando tabelas base (DROP + CREATE), EXCETO info_dados...")
 
     with conn.cursor() as cur:
+        cur.execute("SET synchronous_commit = OFF;")
         # NÃO remover info_dados
         # Mantém histórico de atualizações
 
@@ -686,8 +665,9 @@ def load_empresa(conn, arquivos_empresa, arquivos_com_erro):
     logger.info("==== Iniciando carga EMPRESA (STREAMING COPY EXPERT) ====")
 
     with conn.cursor() as cur:
+        cur.execute("SET synchronous_commit = OFF;")
         cur.execute("""
-            CREATE TEMP TABLE empresa_tmp (
+            CREATE UNLOGGED TABLE empresa_tmp (
                 cnpj_basico TEXT,
                 razao_social TEXT,
                 natureza_juridica TEXT,
@@ -763,7 +743,8 @@ def load_generic_table(conn, table_name, temp_table_name, columns, arquivos, arq
     col_list = ", ".join(columns)
 
     with conn.cursor() as cur:
-        cur.execute(f"CREATE TEMP TABLE {temp_table_name} ({cols_def});")
+        cur.execute("SET synchronous_commit = OFF;")
+        cur.execute(f"CREATE UNLOGGED TABLE {temp_table_name} ({cols_def});")
         conn.commit()
 
         copy_sql = COPY_CSV.format(temp_table=temp_table_name)
@@ -806,6 +787,7 @@ def inserir_info_dados(conn, info):
     if not info:
         return
     with conn.cursor() as cur:
+        cur.execute("SET synchronous_commit = OFF;")
         cur.execute(
             """
         INSERT INTO info_dados (ano, mes, data_atualizacao)
@@ -825,6 +807,7 @@ def criar_indices():
     try:
         conn = connect_db(autocommit=True)
         with conn.cursor() as cur:
+            cur.execute("SET synchronous_commit = OFF;")
             logger.info("Criando índices (CONCURRENTLY) nas tabelas principais...")
 
             indices = [

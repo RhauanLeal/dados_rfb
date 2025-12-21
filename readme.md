@@ -158,44 +158,32 @@ deactivate
 ### No Windows
 
 * execute Ambiente virtual `.\venv\Scripts\activate` depois o arquivo `python etl_rfb_dados.py --etl` e aguarde a finalização do processo.
-  
- - executando no docker pelo terminal
-docker exec -d dados_rfb-etl python etl_rfb_dados.py --etl
 
- - para acompanhar a execução em tempo real veja o arquivo 
-docker exec dados_rfb-etl tail -f /code/logs/etl_rfb_dados_log.txt
 
- - Ver os processos no docker do windows
-docker exec dados_rfb-etl ps aux | Select-String python
-
- - Matar o processo no docker do windows
-docker exec dados_rfb-etl kill PID
 
 
 # Bonus Docker!
+# ==================================
 
-# 1. Construa a imagem
+# 1. Construa a imagem (via cmd entre na pasta do seu projeto)
 docker compose build --no-cache
 
-# 4. Suba o container
+# 4. Suba o container (no caso do ETL ele ja inicia automaticamente)
+- recomendado, pois inicia, executa, Remove container ao final (sem utilizar recursos desnecessários)
+docker compose run --rm etl
+
+- menos ideal mas funciona
 docker compose up -d
 
 # 5. Verifique se está rodando - Deve mostrar status "Up"
 docker ps
 
-# 6. Agora execute o ETL
-
- - Executar o script ETL, se fechar o terminal ele não para pq ta dentro do docker
-docker exec -it dados_rfb-etl python etl_rfb_dados.py --etl
-
- - Sempre execute assim em segundo plano dentro do docker, não exibe docker logs
-docker exec -d dados_rfb-etl python etl_rfb_dados.py --etl
-
-# e acompanhe os logs:
+# 6. acompanhe os logs:
+- logs do container:
 docker logs -f dados_rfb-etl
 
-# ou tem tempor real:
-docker exec dados_rfb-etl tail -f /code/logs/etl_rfb_dados_log.txt
+- para acompanhar a execução em tempo real veja o arquivo 
+sudo tail -f /opt/dados_rfb/logs/etl_rfb_dados_log.txt
 
 # Acessar o container para debug
 docker exec -it dados_rfb-etl bash
@@ -214,3 +202,9 @@ docker rmi dados_rfb-etl
 
 # !Parar o container
 docker compose down
+
+ - Ver os processos no docker do windows
+docker exec dados_rfb-etl ps aux | Select-String python
+
+ - Matar o processo no docker do windows
+docker exec dados_rfb-etl kill PID
