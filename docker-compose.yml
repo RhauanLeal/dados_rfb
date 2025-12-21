@@ -17,3 +17,6 @@ services:
     mem_reservation: 3g
     networks:
       - snfisc-network
+networks:
+  snfisc-network:
+    external: true
