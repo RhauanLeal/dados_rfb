@@ -596,6 +596,13 @@ def create_base_tables(conn):
             data_exclusao_mei TEXT
         );
         """)
+        
+        cur.execute("""
+            CREATE TABLE cnae (
+                codigo text PRIMARY KEY,
+                descricao text
+            );
+        """)
 
         cur.execute("""
         CREATE TABLE socios (
