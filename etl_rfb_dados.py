@@ -56,7 +56,7 @@ ERRO_FILES_PATH = BASE_DIR / "files_error"
 CHUNK_ROWS  = 1_000_000  # 1 milhão de linhas por chunk (leitura)
 CHUNK_TO_SQL= 10_000     # 10 mil linhas por insert no to_sql (insert)
 
-logger.info("\n ================================================================================")
+logger.info("================================================================================")
 logger.info("Iniciando ETL - dados_rfb")
 
 # carrega o arquivo de configuração .env

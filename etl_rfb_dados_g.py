@@ -59,8 +59,8 @@ ERRO_FILES_PATH = BASE_DIR / "files_error"
 CHUNK_ROWS  = 1_000_000  # 1 milhão de linhas por chunk (leitura)
 CHUNK_TO_SQL= 10_000     # 10 mil linhas por insert no to_sql (insert)
 
-logger.info("\n ================================================================================")
-logger.info("Iniciando ETL - dados_rfb")
+logger.info("================================================================================")
+logger.info("Iniciando ETL - dados_rfb G")
 
 # carrega o arquivo de configuração .env
 # Caminho relativo, subindo um nível para acessar dados_rfb/.env
@@ -593,16 +593,21 @@ def inserir_info_dados(info):
 
 
 # traz a lista de arquivos da url
-def get_files(base_url):
+def get_files(base_url, processar_simples=True):
     response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
     
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        logger.info(f"Baixando arquivos do mês: {base_url}")
-
         # Identificar arquivos ZIP disponíveis para download
         files = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".zip")]
+
+        logger.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
+
+        # Se processar_simples for False, remove arquivos que contenham 'Simples' no nome
+        if not processar_simples:
+            logger.info("Ignorando arquivo do Simples")
+            files = [f for f in files if "Simples" not in f and "SIMPLES" not in f]
 
         if not files:
             logger.info("Nenhum arquivo .zip encontrado para o mês atual.")
@@ -658,6 +663,87 @@ def extract_files(zip_path, extract_to):
     logger.info(f"Extraindo {zip_path} para {extract_to}...")
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(extract_to)
+
+
+def apply_fixes(processar_simples=True):
+    """
+    Aplica correções estáticas na base de dados.
+    """
+    # É recomendável rodar isso ANTES de criar os índices para ser mais rápido
+    conn, engine = connect_db()
+    cur = conn.cursor()
+
+    try:
+        logger.info("APLICANDO CORREÇÕES NA BASE DE DADOS...")
+
+        # Inserções simples (Tabelas auxiliares são pequenas, aqui é instantâneo)
+        # Corrigindo Países
+        logger.info("Inserindo correções em pais...")
+        cur.execute("""
+            INSERT INTO public.pais (codigo, descricao) 
+            VALUES ('008', 'ABU DHABI'), ('009', 'DIRCE'), ('015', 'ALAND, ILHAS'),
+                   ('150', 'JERSEY, ILHA DO CANAL'), ('151', 'CANARIAS, ILHAS'), ('200', 'CURACAO'),
+                   ('321', 'GUERNSEY'), ('359', 'MAN, ILHA DE'), ('367', 'INGLATERRA'),
+                   ('393', 'JERSEY'), ('449', 'MACEDONIA (ANTIGA REP. IUGOSLAVA)'),
+                   ('452', 'MADEIRA, ILHA DA'), ('498', 'MOLDAVIA'), ('578', 'PALESTINA'),
+                   ('678', 'SAO TOME E PRINCIPE'), ('699', 'SAO MARTINHO, ILHA DE (PARTE HOLANDESA)'),
+                   ('737', 'SERVIA'), ('994', 'AZerbaijao')
+            ON CONFLICT (codigo) DO NOTHING;
+        """)
+
+        # # 1. DELETE Duplicatas - CUIDADO: Pode demorar muito se a tabela empresa for grande
+        # logger.info("Removendo duplicatas da tabela empresa...")
+        # query_delete_duplicatas = """
+        #     DELETE FROM empresa
+        #     WHERE ctid IN (
+        #         SELECT ctid FROM (
+        #             SELECT ctid, ROW_NUMBER() OVER (
+        #                 PARTITION BY cnpj_basico ORDER BY 
+        #                 CASE WHEN razao_social IS NOT NULL AND TRIM(razao_social) <> '' THEN 0 ELSE 1 END, 
+        #                 ctid
+        #             ) as rn FROM empresa
+        #         ) t WHERE t.rn > 1
+        #     );
+        # """
+        # cur.execute(query_delete_duplicatas)
+
+        # 2. UPDATES em Estabelecimento - IMPORTANTE: Filtre apenas o necessário
+        # logger.info("Limpando códigos de país na tabela estabelecimento...")
+        # cur.execute("UPDATE estabelecimento SET pais = NULL WHERE pais = '0';")
+        
+        # cur.execute("""
+        #     UPDATE estabelecimento 
+        #     SET pais = LPAD(pais, 3, '0') 
+        #     WHERE pais IS NOT NULL AND LENGTH(TRIM(pais)) = 2;
+        # """)
+
+        # # 3. Portes Vazios
+        # logger.info("Corrigindo porte na tabela empresa...")
+        # cur.execute("UPDATE empresa SET porte = '00' WHERE porte = '' OR porte IS NULL;")
+
+        # 4. CNPJs problemáticos conhecidos no Simples
+        if processar_simples:
+            logger.info("Removendo CNPJs inválidos da tabela simples...")
+            cur.execute("""
+                DELETE FROM public.simples 
+                WHERE cnpj_basico IN ('24417449', '24539162', '30721933', '30728066', 
+                                    '30760363', '30847991', '30857441', '30886793', '30972017');
+            """)
+
+        conn.commit()
+        logger.info("CORREÇÕES APLICADAS COM SUCESSO.")
+
+    except Exception as e:
+        conn.rollback() # Reverte se der erro para não corromper
+        logger.error(f"ERRO AO APLICAR CORREÇÕES: {e}")
+        logger.info("ETL Finalizado.")
+        raise
+    
+    finally:
+        cur.close()
+        conn.close()
+        engine.dispose() # Libera recursos da engine
+        gc.collect()
 
 
 # Cria os indices nas tabelas, exceto da info_dados
@@ -716,7 +802,7 @@ def move_file_error(extracted_file_path, arquivo):
 
 
 # Função principal do ETL
-def etl_process():
+def etl_process(processar_simples=True):
     try:
         # Criar os diretórios caso não existam
         OUTPUT_FILES_PATH.mkdir(parents=True, exist_ok=True)
@@ -735,12 +821,10 @@ def etl_process():
         logger.info(f"Nova atualização encontrada: {info['ano']}-{info['mes']:02d} em {info['data_atualizacao']}")
         logger.info(f"URL base para download: {info['url']}")
         
-        files = get_files(info['url'])
+        files = get_files(info['url'], processar_simples=processar_simples)
         if not files:
             logger.info("Nenhum arquivo .zip para processar. Encerrando.")
             return
-
-        logger.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
 
         # Baixar arquivos
         zip_files = [download_file(info['url'] + file, OUTPUT_FILES_PATH) for file in files]
@@ -808,8 +892,9 @@ def etl_process():
         cur = conn.cursor()
 
         # Começa arquivos_empresa
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "empresa" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela empresa (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "empresa" ;')
         conn.commit()
         for arquivo in arquivos_empresa:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
@@ -873,8 +958,9 @@ def etl_process():
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "estabelecimento";')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela estabelecimento (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "estabelecimento";')
         conn.commit()
 
         for arquivo in arquivos_estabelecimento:
@@ -960,8 +1046,9 @@ def etl_process():
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert (opcional, dependendo da sua lógica de repetição)
-        cur.execute('DROP TABLE IF EXISTS "socios";')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela socios (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "socios";')
         conn.commit()
 
         for arquivo in arquivos_socios:
@@ -1052,105 +1139,108 @@ def etl_process():
 
         gc.collect()
 
-        # Reabre conexão
-        conn, engine = connect_db()
-        cur = conn.cursor()
+        if processar_simples:
+            # Reabre conexão
+            conn, engine = connect_db()
+            cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "simples";')
-        conn.commit()
+            # Limpa a tabela antes do insert
+            logger.info("Limpando dados da tabela simples (mantendo estrutura)...")
+            cur.execute('TRUNCATE TABLE "simples";')
+            conn.commit()
 
-        for arquivo in arquivos_simples:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+            for arquivo in arquivos_simples:
+                logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+                extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
+                if not os.path.exists(extracted_file_path):
+                    logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
+                    continue
 
+                try:
+                    # Dtypes: Lemos datas como object (string) para limpar os '00000000' antes
+                    simples_dtypes = {
+                        0: object,
+                        1: object,
+                        2: object, # data_opcao_simples
+                        3: object, # data_exclusao_simples
+                        4: object,
+                        5: object, # data_opcao_mei
+                        6: object  # data_exclusao_mei
+                    }
+
+                    for i, chunk in enumerate(pd.read_csv(
+                        extracted_file_path,
+                        sep=';',
+                        header=None,
+                        dtype=simples_dtypes,
+                        encoding='latin-1',
+                        chunksize=CHUNK_ROWS,
+                    )):
+                        # Renomear colunas
+                        chunk.columns = [
+                            'cnpj_basico',
+                            'opcao_pelo_simples',
+                            'data_opcao_simples',
+                            'data_exclusao_simples',
+                            'opcao_mei',
+                            'data_opcao_mei',
+                            'data_exclusao_mei'
+                        ]
+
+                        # Tratamento de Datas: Converte '00000000' em Nat (None no banco)
+                        colunas_datas = [
+                            'data_opcao_simples', 'data_exclusao_simples', 
+                            'data_opcao_mei', 'data_exclusao_mei'
+                        ]
+                        
+                        for col in colunas_datas:
+                            # errors='coerce' transforma o que não é data (como 00000000) em nulo
+                            chunk[col] = pd.to_datetime(chunk[col], format='%Y%m%d', errors='coerce')
+
+                        # Gravar dados no banco usando o método COPY
+                        try:
+                            chunk.to_sql(
+                                name='simples',
+                                con=engine,
+                                if_exists='append',
+                                index=False,
+                                method=psql_insert_copy # Função de alta performance
+                            )
+                            logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
+
+                        except Exception as e:
+                            logger.error(f"Erro ao inserir chunk {i} de simples: {e}")
+                            break
+
+                        finally:
+                            del chunk
+                            gc.collect()
+
+                except Exception as e:
+                    logger.error(f"Erro ao processar o arquivo simples {arquivo}: {e}")
+                    arquivos_com_erro.append(arquivo)
+                    move_file_error(extracted_file_path, arquivo)
+
+            logger.info("Arquivos do simples finalizados!")
+
+            # Encerramento seguro de recursos
             try:
-                # Dtypes: Lemos datas como object (string) para limpar os '00000000' antes
-                simples_dtypes = {
-                    0: object,
-                    1: object,
-                    2: object, # data_opcao_simples
-                    3: object, # data_exclusao_simples
-                    4: object,
-                    5: object, # data_opcao_mei
-                    6: object  # data_exclusao_mei
-                }
+                cur.close()
+                conn.close()
+                engine.dispose()
+            except:
+                pass
 
-                for i, chunk in enumerate(pd.read_csv(
-                    extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=simples_dtypes,
-                    encoding='latin-1',
-                    chunksize=CHUNK_ROWS,
-                )):
-                    # Renomear colunas
-                    chunk.columns = [
-                        'cnpj_basico',
-                        'opcao_pelo_simples',
-                        'data_opcao_simples',
-                        'data_exclusao_simples',
-                        'opcao_mei',
-                        'data_opcao_mei',
-                        'data_exclusao_mei'
-                    ]
-
-                    # Tratamento de Datas: Converte '00000000' em Nat (None no banco)
-                    colunas_datas = [
-                        'data_opcao_simples', 'data_exclusao_simples', 
-                        'data_opcao_mei', 'data_exclusao_mei'
-                    ]
-                    
-                    for col in colunas_datas:
-                        # errors='coerce' transforma o que não é data (como 00000000) em nulo
-                        chunk[col] = pd.to_datetime(chunk[col], format='%Y%m%d', errors='coerce')
-
-                    # Gravar dados no banco usando o método COPY
-                    try:
-                        chunk.to_sql(
-                            name='simples',
-                            con=engine,
-                            if_exists='append',
-                            index=False,
-                            method=psql_insert_copy # Função de alta performance
-                        )
-                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
-
-                    except Exception as e:
-                        logger.error(f"Erro ao inserir chunk {i} de simples: {e}")
-                        break
-
-                    finally:
-                        del chunk
-                        gc.collect()
-
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo simples {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
-
-        logger.info("Arquivos do simples finalizados!")
-
-        # Encerramento seguro de recursos
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
+            gc.collect()
 
         # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "cnae";')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela cnae (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "cnae";')
         conn.commit()
 
         for arquivo in arquivos_cnae:
@@ -1218,8 +1308,9 @@ def etl_process():
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "moti" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela moti (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "moti" ;')
         conn.commit()
 
         for arquivo in arquivos_moti:
@@ -1292,8 +1383,9 @@ def etl_process():
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "munic";')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela munic (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "munic";')
         conn.commit()
 
         for arquivo in arquivos_munic:
@@ -1367,8 +1459,9 @@ def etl_process():
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "natju";')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela natju (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "natju";')
         conn.commit()
 
         for arquivo in arquivos_natju:
@@ -1442,8 +1535,9 @@ def etl_process():
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "pais";')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela pais (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "pais";')
         conn.commit()
 
         for arquivo in arquivos_pais:
@@ -1518,8 +1612,9 @@ def etl_process():
         cur = conn.cursor()
 
         # Arquivos de qualificação de sócios:
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "quals" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela quals (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "quals" ;')
         conn.commit()
 
         for arquivo in arquivos_quals:
@@ -1604,6 +1699,9 @@ def etl_process():
         # Processo de inserção finalizado
         logger.info('Processo de carga dos arquivos finalizado!')
 
+        # Aplica correções nas tabelas
+        apply_fixes(processar_simples=processar_simples)
+
         # Criação dos índices
         criar_indices()
 
@@ -1622,21 +1720,54 @@ def etl_process():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ETL Receita Federal do Brasil")
+    
+    # Flag para rodar o ETL (será True por padrão se nada for passado)
     parser.add_argument(
-        "--etl",
-        action="store_true",
-        help="Executa o processo completo de ETL"
+        "--etl", 
+        action="store_true", 
+        help="Executa o processo de extração e carga."
     )
+    
+    # Flag para pular o simples
     parser.add_argument(
-        "--inserir_indice",
-        action="store_true",
-        help="Cria índices nas tabelas do banco"
+        "--no-simples", 
+        action="store_false", 
+        dest="processar_simples", 
+        help="Não processa os dados do Simples Nacional."
+    )
+    
+    parser.add_argument(
+        "--inserir_indice", 
+        action="store_true", 
+        help="Cria índices nas tabelas."
     )
 
+    parser.add_argument(
+        "--fixes", 
+        action="store_true", 
+        help="Aplica correções na base."
+    )
+
+    # Define o padrão do Simples como True
+    parser.set_defaults(processar_simples=True)
     args = parser.parse_args()
 
-    if args.etl:
-        etl_process()
+    # LÓGICA DE EXECUÇÃO PADRÃO:
+    # Se o usuário não passou NENHUM argumento (nem --etl, nem --fixes, nem --inserir_indice)
+    # nós forçamos a execução do ETL completo.
+    if not (args.etl or args.inserir_indice or args.fixes):
+        logger.info("Nenhum argumento detectado. Iniciando ETL completo por padrão...")
+        args.etl = True
 
+    # 1. Executa ETL (se solicitado ou se for o padrão)
+    if args.etl:
+        logger.info(f"Iniciando ETL (Processar Simples: {args.processar_simples})")
+        etl_process(processar_simples=args.processar_simples)
+
+    # 2. Executa Correções (se solicitado explicitamente)
+    if args.fixes:
+        apply_fixes(processar_simples=args.processar_simples)
+
+    # 3. Executa Índices (se solicitado explicitamente)
     if args.inserir_indice:
         criar_indices()
