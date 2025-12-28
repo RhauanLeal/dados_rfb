@@ -13,8 +13,8 @@ services:
     environment:
       - TZ=America/Boa_Vista
     restart: no
-    mem_limit: 6g
-    mem_reservation: 3g
+    mem_limit: 16g
+    mem_reservation: 8g
     networks:
       - snfisc-network
 networks:

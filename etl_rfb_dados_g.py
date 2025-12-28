@@ -14,6 +14,9 @@ from sqlalchemy import create_engine
 from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from bs4 import BeautifulSoup
 from datetime import datetime
+import io
+import csv
+
 '''
 Sistema de importação dos dados abertos da Receita Federal do Brasil (RFB)
 * arquivos baixados via HTTP são armazenados localmente,
@@ -79,6 +82,23 @@ if not dotenv_path:
 
 # Carrega o arquivo
 load_dotenv(dotenv_path)
+
+def psql_insert_copy(table, conn, keys, data_iter):
+    """
+    Função de callback para o pandas.to_sql que utiliza o comando COPY do PostgreSQL.
+    """
+    # Configura o buffer de memória
+    s_buf = io.StringIO()
+    writer = csv.writer(s_buf, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
+    writer.writerows(data_iter)
+    s_buf.seek(0)
+
+    # Acessa o cursor do driver psycopg2 bruto
+    dbapi_conn = conn.connection
+    with dbapi_conn.cursor() as cur:
+        sql = f'COPY "{table.name}" ({", ".join([f'"{k}"' for k in keys])}) FROM STDIN WITH DELIMITER \'\t\' CSV'
+        cur.copy_expert(sql=sql, file=s_buf)
+
 
 def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
     '''
@@ -643,35 +663,47 @@ def extract_files(zip_path, extract_to):
 # Cria os indices nas tabelas, exceto da info_dados
 def criar_indices():
     try:
-        conn, _ = connect_db(autocommit=True)  # <- agora com autocommit
+        # Importante: autocommit=True é obrigatório para CONCURRENTLY
+        conn, _ = connect_db(autocommit=True)
         cur = conn.cursor()
+
+        logger.info("Aumentando memória de manutenção para criação de índices...")
+        cur.execute("SET maintenance_work_mem = '2GB';") # Acelera muito no seu Xeon
 
         logger.info("Iniciando criação dos índices...")
 
+        # Lista expandida para garantir performance em buscas reais
         indices = [
             ("empresa", "cnpj_basico"),
             ("estabelecimento", "cnpj_basico"),
             ("socios", "cnpj_basico"),
             ("simples", "cnpj_basico"),
+            ("cnae", "codigo"),
+            ("munic", "codigo")
         ]
 
         for tabela, coluna in indices:
-            nome_indice = f"{tabela}_{coluna}_idx"
+            nome_indice = f"idx_{tabela}_{coluna}"
             try:
+                logger.info(f"Criando índice {nome_indice}...")
+                # CONCURRENTLY evita travar a tabela, IF NOT EXISTS evita erros em restarts
                 sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
                 cur.execute(sql)
-                logger.info(f"Índice {nome_indice} criado com sucesso.")
+                logger.info(f"Índice {nome_indice} finalizado.")
             except Exception as e:
-                logger.error(f"Erro ao criar o índice {nome_indice}: {e}", exc_info=True)
+                logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
+
+        # Opcional: Analisar as tabelas para atualizar as estatísticas do otimizador
+        logger.info("Rodando ANALYZE para otimizar estatísticas...")
+        cur.execute("ANALYZE;")
 
         cur.close()
         conn.close()
         gc.collect()
-        logger.info("Criação dos índices finalizada.")
+        logger.info("Processo de indexação concluído com sucesso!")
 
     except Exception as e:
         logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
-        logger.critical("Não foi possível iniciar o aplicativo")
         sys.exit(1)
 
 
@@ -787,66 +819,40 @@ def etl_process():
                 logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
                 continue
 
-            try:
-                empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
+            empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
+            for i, chunk in enumerate(pd.read_csv(extracted_file_path,
+                                    sep=';',
+                                    header=None,
+                                    dtype=empresa_dtypes,
+                                    encoding='latin-1',
+                                    chunksize=CHUNK_ROWS)):
 
-                for i, chunk in enumerate(pd.read_csv(extracted_file_path,
-                                                    sep=';',
-                                                    header=None,
-                                                    dtype=empresa_dtypes,
-                                                    encoding='latin-1',
-                                                    chunksize=CHUNK_ROWS,
-                                                    )):
+                chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 
+                                'qualificacao_responsavel', 'capital_social', 
+                                'porte_empresa', 'ente_federativo_responsavel']
 
-                    chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
+                # Tratamento de capital social otimizado
+                chunk['capital_social'] = chunk['capital_social'].astype(str).str.replace(',', '.').replace('nan', '0').astype(float).fillna(0.0)
 
-                    def tratar_capital(x):
-                        try:
-                            return float(str(x).replace(',', '.'))
-                        except:
-                            return 0.0
-
-                    chunk['capital_social'] = chunk['capital_social'].apply(tratar_capital)
+                try:
+                    # A mágica acontece aqui: method=psql_insert_copy
+                    chunk.to_sql(
+                        name='empresa', 
+                        con=engine, 
+                        if_exists='append', 
+                        index=False, 
+                        method=psql_insert_copy  # Chama a função que criamos acima
+                    )
+                    logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
                     
-                    try:
-                        chunk.to_sql(
-                            name='empresa', 
-                            con=engine, 
-                            if_exists='append', 
-                            index=False, 
-                            chunksize=CHUNK_TO_SQL,
-                            method='multi'
-                            )
-                        logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso!")
-                    except Exception as e:
-                        logger.error(f"Erro ao inserir chunk {i} do arquivo {arquivo}: {e}")
-                        try:
-                            conn.rollback()
-                            logger.warning("Rollback realizado. Tentando inserir novamente o chunk...")
-
-                            # Tenta de novo
-                            chunk.to_sql(
-                                name='empresa',
-                                con=engine,
-                                if_exists='append',
-                                index=False,
-                                chunksize=CHUNK_TO_SQL,
-                                method='multi'
-                            )
-                            logger.info(f"Chunk {i} reprocessado com sucesso!")
-                        except Exception as segunda_falha:
-                            logger.error(f"Falha novamente ao reprocessar chunk {i}: {segunda_falha}")
-                            break  # desiste desse arquivo
-
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
-
-            finally:
-                if 'chunk' in locals():
+                except Exception as e:
+                    logger.error(f"Erro ao inserir via COPY: {e}")
+                    # Se falhar aqui, geralmente é erro de tipo de dado na coluna
+                    break 
+                    
+                finally:
                     del chunk
-                gc.collect()
+                    gc.collect()
 
         logger.info("Arquivos de empresa finalizados!")
         # Fecha cursor
@@ -863,13 +869,14 @@ def etl_process():
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "estabelecimento" ;')
+        cur.execute('DROP TABLE IF EXISTS "estabelecimento";')
         conn.commit()
+
         for arquivo in arquivos_estabelecimento:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
             
@@ -879,9 +886,10 @@ def etl_process():
                 continue
 
             try:
+                # Dtypes para evitar que o Pandas tente adivinhar e consuma RAM
                 estabelecimento_dtypes = {
                     0: object, 1: object, 2: object, 3: 'Int32', 4: object, 5: 'Int32', 6: 'Int32',
-                    7: 'Int32', 8: object, 9: object, 10: 'Int32', 11: 'Int32', 12: object, 13: object,
+                    7: 'Int32', 8: object, 9: object, 10: object, 11: object, 12: object, 13: object,
                     14: object, 15: object, 16: object, 17: object, 18: object, 19: object,
                     20: 'Int32', 21: object, 22: object, 23: object, 24: object, 25: object,
                     26: object, 27: object, 28: object, 29: 'Int32'
@@ -907,48 +915,55 @@ def etl_process():
                         'data_situacao_especial'
                     ]
 
-                    chunk.to_sql(
-                        name='estabelecimento',
-                        con=engine,
-                        if_exists='append',
-                        index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
-                    )
+                    # --- TRATAMENTO DE DATAS (Opcional, mas evita erros no Postgres) ---
+                    # Converte YYYYMMDD para YYYY-MM-DD ou None se zero/inválido
+                    colunas_data = ['data_situacao_cadastral', 'data_inicio_atividade', 'data_situacao_especial']
+                    for col in colunas_data:
+                        chunk[col] = pd.to_datetime(chunk[col], format='%Y%m%d', errors='coerce')
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    try:
+                        # Substituído method='multi' pelo psql_insert_copy
+                        chunk.to_sql(
+                            name='estabelecimento',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy 
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
+
+                    except Exception as e:
+                        logger.error(f"Erro no insert do chunk {i}: {e}")
+                        break
+
+                    finally:
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
 
-            finally:
-                if 'chunk' in locals():
-                    del chunk
-                gc.collect()
-
         logger.info("Arquivos de estabelecimento finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close() # Importante fechar a conexão bruta também
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão se necessário ou usa a existente
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "socios" ;')
+        # Drop table antes do insert (opcional, dependendo da sua lógica de repetição)
+        cur.execute('DROP TABLE IF EXISTS "socios";')
         conn.commit()
+
         for arquivo in arquivos_socios:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -958,9 +973,10 @@ def etl_process():
                 continue
 
             try:
+                # Tipagem otimizada para Sócios
                 socios_dtypes = {
                     0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32',
-                    5: 'Int32', 6: 'Int32', 7: object, 8: object,
+                    5: object, 6: 'Int32', 7: object, 8: object,
                     9: 'Int32', 10: 'Int32'
                 }
 
@@ -987,29 +1003,41 @@ def etl_process():
                         'faixa_etaria'
                     ]
 
-                    # Gravar dados no banco:
-                    chunk.to_sql(
-                        name='socios',
-                        con=engine,
-                        if_exists='append',
-                        index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
+                    # Tratamento de data: Converte YYYYMMDD para formato de data real
+                    chunk['data_entrada_sociedade'] = pd.to_datetime(
+                        chunk['data_entrada_sociedade'], 
+                        format='%Y%m%d', 
+                        errors='coerce'
                     )
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    # Gravar dados no banco usando o método COPY
+                    try:
+                        chunk.to_sql(
+                            name='socios',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy  # Otimização vital
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
+
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de sócios: {e}")
+                        break
+
+                    finally:
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo de sócios {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
-                if 'chunk' in locals():
-                    del chunk
                 gc.collect()
 
-        logger.info("Arquivos de socios finalizados!")
+        logger.info("Arquivos de sócios finalizados!")
         # Fecha cursor
         try:
             cur.close()
@@ -1024,13 +1052,14 @@ def etl_process():
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "simples" ;')
+        cur.execute('DROP TABLE IF EXISTS "simples";')
         conn.commit()
+
         for arquivo in arquivos_simples:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -1040,14 +1069,15 @@ def etl_process():
                 continue
 
             try:
+                # Dtypes: Lemos datas como object (string) para limpar os '00000000' antes
                 simples_dtypes = {
                     0: object,
                     1: object,
-                    2: 'Int32',
-                    3: 'Int32',
+                    2: object, # data_opcao_simples
+                    3: object, # data_exclusao_simples
                     4: object,
-                    5: 'Int32',
-                    6: 'Int32'
+                    5: object, # data_opcao_mei
+                    6: object  # data_exclusao_mei
                 }
 
                 for i, chunk in enumerate(pd.read_csv(
@@ -1069,50 +1099,60 @@ def etl_process():
                         'data_exclusao_mei'
                     ]
 
-                    # Gravar dados no banco
-                    chunk.to_sql(
-                        name='simples',
-                        con=engine,
-                        if_exists='append',
-                        index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
-                    )
+                    # Tratamento de Datas: Converte '00000000' em Nat (None no banco)
+                    colunas_datas = [
+                        'data_opcao_simples', 'data_exclusao_simples', 
+                        'data_opcao_mei', 'data_exclusao_mei'
+                    ]
+                    
+                    for col in colunas_datas:
+                        # errors='coerce' transforma o que não é data (como 00000000) em nulo
+                        chunk[col] = pd.to_datetime(chunk[col], format='%Y%m%d', errors='coerce')
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                    # Gravar dados no banco usando o método COPY
+                    try:
+                        chunk.to_sql(
+                            name='simples',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy # Função de alta performance
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
+
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de simples: {e}")
+                        break
+
+                    finally:
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo simples {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
-            finally:
-                if 'chunk' in locals():
-                    del chunk
-                gc.collect()
-
         logger.info("Arquivos do simples finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "cnae" ;')
+        cur.execute('DROP TABLE IF EXISTS "cnae";')
         conn.commit()
+
         for arquivo in arquivos_cnae:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -1122,28 +1162,37 @@ def etl_process():
                 continue
 
             try:
-                cnae = pd.read_csv(
+                # Adicionado chunksize para manter o consumo de RAM constante e baixo
+                for i, chunk in enumerate(pd.read_csv(
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
                     dtype='object',
-                    encoding='latin-1'
-                )
+                    encoding='latin-1',
+                    chunksize=CHUNK_ROWS # Mantém o padrão de segurança
+                )):
 
-                # Renomear colunas
-                cnae.columns = ['codigo', 'descricao']
+                    # Renomear colunas
+                    chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                cnae.to_sql(
-                    name='cnae',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                    # Gravar dados no banco usando o método COPY (alta performance)
+                    try:
+                        chunk.to_sql(
+                            name='cnae',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de CNAE: {e}")
+                        break
+
+                    finally:
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
@@ -1151,32 +1200,28 @@ def etl_process():
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
-                if 'cnae' in locals():
-                    del cnae
                 gc.collect()
 
         logger.info("Arquivos de cnae finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "moti" ;')
         conn.commit()
+
         for arquivo in arquivos_moti:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -1191,28 +1236,37 @@ def etl_process():
                     1: object
                 }
 
-                moti = pd.read_csv(
+                # Alterado para ler em chunks para garantir baixo uso de RAM
+                for i, chunk in enumerate(pd.read_csv(
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
                     dtype=moti_dtypes,
-                    encoding='latin-1'
-                )
+                    encoding='latin-1',
+                    chunksize=CHUNK_ROWS
+                )):
 
-                # Renomear colunas
-                moti.columns = ['codigo', 'descricao']
+                    # Renomear colunas
+                    chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                moti.to_sql(
-                    name='moti',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                    # Gravar dados no banco usando COPY
+                    try:
+                        chunk.to_sql(
+                            name='moti',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de MOTI: {e}")
+                        break
+
+                    finally:
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
@@ -1220,33 +1274,28 @@ def etl_process():
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
-                if 'moti' in locals():
-                    del moti
                 gc.collect()
 
         logger.info("Arquivos de moti finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Arquivos de munic:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "munic" ;')
+        cur.execute('DROP TABLE IF EXISTS "munic";')
         conn.commit()
+
         for arquivo in arquivos_munic:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -1261,62 +1310,67 @@ def etl_process():
                     1: object
                 }
 
-                munic = pd.read_csv(
+                # Processamento em chunks para evitar picos de RAM
+                for i, chunk in enumerate(pd.read_csv(
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
                     dtype=munic_dtypes,
-                    encoding='latin-1'
-                )
+                    encoding='latin-1',
+                    chunksize=CHUNK_ROWS
+                )):
 
-                # Renomear colunas
-                munic.columns = ['codigo', 'descricao']
+                    # Renomear colunas
+                    chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                munic.to_sql(
-                    name='munic',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                    # Gravar dados no banco usando COPY (Alta performance)
+                    try:
+                        chunk.to_sql(
+                            name='munic',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de municípios: {e}")
+                        break
+
+                    finally:
+                        # Limpeza agressiva por chunk
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo de municípios {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
-                if 'munic' in locals():
-                    del munic
                 gc.collect()
 
-        logger.info("Arquivos de munic finalizados!")
-        # Fecha cursor
+        logger.info("Arquivos de municípios finalizados!")
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Arquivos de natju:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "natju" ;')
+        cur.execute('DROP TABLE IF EXISTS "natju";')
         conn.commit()
+
         for arquivo in arquivos_natju:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -1331,62 +1385,67 @@ def etl_process():
                     1: object
                 }
 
-                natju = pd.read_csv(
+                # Alterado para leitura em chunks para manter o consumo de RAM estável
+                for i, chunk in enumerate(pd.read_csv(
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
                     dtype=natju_dtypes,
-                    encoding='latin-1'
-                )
+                    encoding='latin-1',
+                    chunksize=CHUNK_ROWS
+                )):
 
-                # Renomear colunas
-                natju.columns = ['codigo', 'descricao']
+                    # Renomear colunas
+                    chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                natju.to_sql(
-                    name='natju',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                    # Gravar dados no banco usando COPY (Alta performance)
+                    try:
+                        chunk.to_sql(
+                            name='natju',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de NATJU: {e}")
+                        break
+
+                    finally:
+                        # Limpeza de memória imediata
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo de natju {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
-                if 'natju' in locals():
-                    del natju
                 gc.collect()
 
         logger.info("Arquivos de natju finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Arquivos de pais:
         # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "pais" ;')
+        cur.execute('DROP TABLE IF EXISTS "pais";')
         conn.commit()
+
         for arquivo in arquivos_pais:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -1401,48 +1460,53 @@ def etl_process():
                     1: object
                 }
 
-                pais = pd.read_csv(
+                # Leitura em chunks para estabilidade total da RAM
+                for i, chunk in enumerate(pd.read_csv(
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
                     dtype=pais_dtypes,
-                    encoding='latin-1'
-                )
+                    encoding='latin-1',
+                    chunksize=CHUNK_ROWS
+                )):
 
-                # Renomear colunas
-                pais.columns = ['codigo', 'descricao']
+                    # Renomear colunas
+                    chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                pais.to_sql(
-                    name='pais',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                    # Gravar dados no banco usando COPY (Otimizado para HDD)
+                    try:
+                        chunk.to_sql(
+                            name='pais',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de países: {e}")
+                        break
+
+                    finally:
+                        # Limpeza de memória
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo de países {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
-                if 'pais' in locals():
-                    del pais
                 gc.collect()
 
-        logger.info("Arquivos de pais finalizados!")
-        # Fecha cursor
+        logger.info("Arquivos de países finalizados!")
+
+        # Encerramento seguro de conexões
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
@@ -1457,6 +1521,7 @@ def etl_process():
         # Drop table antes do insert
         cur.execute('DROP TABLE IF EXISTS "quals" ;')
         conn.commit()
+
         for arquivo in arquivos_quals:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
@@ -1471,28 +1536,38 @@ def etl_process():
                     1: object
                 }
 
-                quals = pd.read_csv(
+                # Alterado para leitura em chunks para manter o consumo de RAM estável
+                for i, chunk in enumerate(pd.read_csv(
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
                     dtype=quals_dtypes,
-                    encoding='latin-1'
-                )
+                    encoding='latin-1',
+                    chunksize=CHUNK_ROWS
+                )):
 
-                # Renomear colunas
-                quals.columns = ['codigo', 'descricao']
+                    # Renomear colunas
+                    chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                quals.to_sql(
-                    name='quals',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                    # Gravar dados no banco usando COPY (Alta performance para HDD)
+                    try:
+                        chunk.to_sql(
+                            name='quals',
+                            con=engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_copy  # Otimização vital
+                        )
+                        logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                    except Exception as e:
+                        logger.error(f"Erro ao inserir chunk {i} de QUALS: {e}")
+                        break
+
+                    finally:
+                        # Limpeza de memória imediata
+                        del chunk
+                        gc.collect()
 
             except Exception as e:
                 logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
@@ -1500,19 +1575,14 @@ def etl_process():
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
-                if 'quals' in locals():
-                    del quals
                 gc.collect()
-        
+
         logger.info("Arquivos de quals finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
