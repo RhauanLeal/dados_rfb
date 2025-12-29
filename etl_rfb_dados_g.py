@@ -52,7 +52,6 @@ logger = logging.getLogger(__name__)
 # Diretórios fixos para armazenar os arquivos
 BASE_DIR = pathlib.Path().resolve()  # Diretório do script
 OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
-EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
 
 # Tamanho padrão de chunk para leitura dos arquivos grandes
@@ -659,13 +658,6 @@ def download_file(url, output_path):
     return file_name
 
 
-# Função para extrair arquivos ZIP
-def extract_files(zip_path, extract_to):
-    logger.info(f"Extraindo {zip_path} para {extract_to}...")
-    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-        zip_ref.extractall(extract_to)
-
-
 def apply_fixes(processar_simples=True):
     """
     Aplica correções estáticas na base de dados.
@@ -824,12 +816,31 @@ def criar_indices():
         sys.exit(1)
 
 
-def move_file_error(extracted_file_path, arquivo):
+def move_file_error(zip_path, arquivo):
+    """
+    Move o arquivo ZIP que contém o arquivo com erro para a pasta de erros.
+    
+    Args:
+        zip_path: Caminho completo do arquivo ZIP
+        arquivo: Nome do arquivo dentro do ZIP que teve erro
+    """
     try:
-        shutil.move(extracted_file_path, ERRO_FILES_PATH / arquivo)
-        logger.info(f"Arquivo {arquivo} movido para a pasta de erro: {ERRO_FILES_PATH}")
-    except Exception as move_err:
-        logger.error(f"Erro ao mover o arquivo {arquivo} para a pasta erro: {move_err}")
+        # Garante que o diretório de erros existe
+        ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
+        
+        # Nome do arquivo ZIP
+        zip_filename = os.path.basename(zip_path)
+        
+        # Caminho de destino
+        destino = ERRO_FILES_PATH / zip_filename
+        
+        # Move o arquivo ZIP para a pasta de erros
+        shutil.move(zip_path, destino)
+        
+        logger.warning(f"Arquivo ZIP '{zip_filename}' movido para pasta de erros devido a erro no arquivo '{arquivo}'")
+        
+    except Exception as e:
+        logger.error(f"Erro ao mover arquivo ZIP para pasta de erros: {e}")
 
 
 def parse_brazilian_float(value):
@@ -862,10 +873,9 @@ def etl_process(processar_simples=True):
     try:
         # Criar os diretórios caso não existam
         OUTPUT_FILES_PATH.mkdir(parents=True, exist_ok=True)
-        EXTRACTED_FILES_PATH.mkdir(parents=True, exist_ok=True)
         ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Extraídos: {EXTRACTED_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
+        logger.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
 
         start_time = datetime.now()
 
@@ -885,11 +895,6 @@ def etl_process(processar_simples=True):
         # Baixar arquivos
         zip_files = [download_file(info['url'] + file, OUTPUT_FILES_PATH) for file in files]
 
-        # Extrair arquivos
-        # for zip_file in zip_files:
-        #     extract_files(zip_file, EXTRACTED_FILES_PATH)
-        # logger.info("Todos os arquivos foram baixados e extraídos. Iniciando processamento dos dados.")
-        
         logger.info("Todos os arquivos foram baixados. Iniciando processamento dos dados.")
 
         # Processar os arquivos após download completo
@@ -907,39 +912,6 @@ def etl_process(processar_simples=True):
         # Arquivos com erro no processamento
         arquivos_com_erro = []
         
-        # for file in os.listdir(EXTRACTED_FILES_PATH):
-        #     if "EMPRE" in file:
-        #         arquivos_empresa.append(file)
-        #     elif "ESTABELE" in file:
-        #         arquivos_estabelecimento.append(file)
-        #     elif "SOCIO" in file:
-        #         arquivos_socios.append(file)
-        #     elif "SIMPLES" in file:
-        #         arquivos_simples.append(file)
-        #     elif "CNAE" in file:
-        #         arquivos_cnae.append(file)
-        #     elif "MOTI" in file:
-        #         arquivos_estabelecimento_motivo.append(file)
-        #     elif "MUNIC" in file:
-        #         arquivos_munic.append(file)        #     elif "NATJU" in file:
-        #         arquivos_empresa_natureza_juridica.append(file)
-        #     elif "PAIS" in file:
-        #         arquivos_pais.append(file)
-        #     elif "QUALS" in file:
-        #         arquivos_socios_qualificacao.append(file)
-
-        # # deixar em ordem alfabética
-        # arquivos_empresa.sort()
-        # arquivos_estabelecimento.sort()
-        # arquivos_socios.sort()
-        # arquivos_simples.sort()
-        # arquivos_cnae.sort()
-        # arquivos_estabelecimento_motivo.sort()
-        # arquivos_munic.sort()
-        # arquivos_empresa_natureza_juridica.sort()
-        # arquivos_pais.sort()
-        # arquivos_socios_qualificacao.sort()
-
         # Coleta todos os arquivos de todos os ZIPs
         for zip_file in zip_files:
             with zipfile.ZipFile(zip_file, 'r') as zip_ref:
@@ -992,14 +964,7 @@ def etl_process(processar_simples=True):
         logger.info("Limpando dados da tabela empresa (mantendo estrutura)...")
         cur.execute('TRUNCATE TABLE "empresa" ;')
         conn.commit()
-        # for arquivo in arquivos_empresa:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
+ 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_empresa:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1007,14 +972,24 @@ def etl_process(processar_simples=True):
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 with zip_ref.open(arquivo) as file:
                     try:
-                        empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
-                        for i, chunk in enumerate(pd.read_csv( #extracted_file_path,
-                                                file,
-                                                sep=';',
-                                                header=None,
-                                                dtype=empresa_dtypes,
-                                                encoding='latin-1',
-                                                chunksize=CHUNK_ROWS)):
+                        empresa_dtypes = {
+                            0: object, 
+                            1: object, 
+                            2: 'Int32', 
+                            3: 'Int32', 
+                            4: object, 
+                            5: 'Int32', 
+                            6: object
+                            }
+                        
+                        # Alterado para leitura em chunks para manter o consumo de RAM estável
+                        for i, chunk in enumerate(pd.read_csv(
+                                filepath_or_buffer=file,
+                                sep=';',
+                                header=None,
+                                dtype=empresa_dtypes,
+                                encoding='latin-1',
+                                chunksize=CHUNK_ROWS)):
 
                             chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 
                                             'qualificacao_responsavel', 'capital_social', 
@@ -1024,7 +999,7 @@ def etl_process(processar_simples=True):
                             chunk['capital_social'] = chunk['capital_social'].apply(parse_brazilian_float)
 
                             try:
-                                # A mágica acontece aqui: method=psql_insert_copy
+                                # Gravar dados no banco usando COPY (Alta performance para HDD)
                                 chunk.to_sql(
                                     name='empresa', 
                                     con=engine, 
@@ -1046,7 +1021,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo)
 
                     finally:
                         gc.collect()
@@ -1072,14 +1047,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "estabelecimento";')
         conn.commit()
 
-        # for arquivo in arquivos_estabelecimento:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-            
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_estabelecimento:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1098,8 +1065,7 @@ def etl_process(processar_simples=True):
                         }
 
                         for i, chunk in enumerate(pd.read_csv(
-                            # extracted_file_path,
-                            file,
+                            filepath_or_buffer=file,
                             sep=';',
                             header=None,
                             dtype=estabelecimento_dtypes,
@@ -1125,7 +1091,7 @@ def etl_process(processar_simples=True):
                             chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d',errors='coerce'))
 
                             try:
-                                # Substituído method='multi' pelo psql_insert_copy
+                                # Gravar dados no banco usando COPY (Alta performance para HDD)
                                 chunk.to_sql(
                                     name='estabelecimento',
                                     con=engine,
@@ -1146,7 +1112,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1172,14 +1138,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "socios";')
         conn.commit()
 
-        # for arquivo in arquivos_socios:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_socios:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1196,8 +1154,7 @@ def etl_process(processar_simples=True):
                         }
 
                         for i, chunk in enumerate(pd.read_csv(
-                            # extracted_file_path,
-                            file,
+                            filepath_or_buffer=file,
                             sep=';',
                             header=None,
                             dtype=socios_dtypes,
@@ -1225,7 +1182,7 @@ def etl_process(processar_simples=True):
                             
                             chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d',errors='coerce'))
 
-                            # Gravar dados no banco usando o método COPY
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
                                     name='socios',
@@ -1247,8 +1204,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        # move_file_error(extracted_file_path, arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1274,16 +1230,8 @@ def etl_process(processar_simples=True):
             cur.execute('TRUNCATE TABLE "simples";')
             conn.commit()
 
-            # for arquivo in arquivos_simples:
-            #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-            #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            #     if not os.path.exists(extracted_file_path):
-            #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-            #         continue
-            
             # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
-            for arquivo, zip_path in arquivos_socios:
+            for arquivo, zip_path in arquivos_simples:
                 logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
                 
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -1302,8 +1250,7 @@ def etl_process(processar_simples=True):
                             }
 
                             for i, chunk in enumerate(pd.read_csv(
-                                # extracted_file_path,
-                                file,
+                                filepath_or_buffer=file,
                                 sep=';',
                                 header=None,
                                 dtype=simples_dtypes,
@@ -1330,7 +1277,7 @@ def etl_process(processar_simples=True):
                                 
                                 chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d', errors='coerce'))
 
-                                # Gravar dados no banco usando o método COPY
+                                # Gravar dados no banco usando COPY (Alta performance para HDD)
                                 try:
                                     chunk.to_sql(
                                         name='simples',
@@ -1352,8 +1299,7 @@ def etl_process(processar_simples=True):
                         except Exception as e:
                             logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                             arquivos_com_erro.append(arquivo)
-                            # move_file_error(extracted_file_path, arquivo)
-                            move_file_error(file, arquivo)
+                            move_file_error(zip_path, arquivo) 
 
                         finally:
                             gc.collect()
@@ -1379,14 +1325,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "cnae";')
         conn.commit()
 
-        # for arquivo in arquivos_cnae:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_cnae:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1402,7 +1340,7 @@ def etl_process(processar_simples=True):
 
                         # Adicionado chunksize para manter o consumo de RAM constante e baixo
                         for i, chunk in enumerate(pd.read_csv(
-                            filepath_or_buffer=file, #extracted_file_path,
+                            filepath_or_buffer=file,
                             sep=';',
                             header=None,
                             dtype=cnae_dtypes,
@@ -1413,7 +1351,7 @@ def etl_process(processar_simples=True):
                             # Renomear colunas
                             chunk.columns = ['codigo', 'descricao']
 
-                            # Gravar dados no banco usando o método COPY (alta performance)
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
                                     name='cnae',
@@ -1435,8 +1373,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        # move_file_error(extracted_file_path, arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1462,14 +1399,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "estabelecimento_motivo" ;')
         conn.commit()
 
-        # for arquivo in arquivos_estabelecimento_motivo:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_estabelecimento_motivo:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1485,7 +1414,7 @@ def etl_process(processar_simples=True):
 
                         # Alterado para ler em chunks para garantir baixo uso de RAM
                         for i, chunk in enumerate(pd.read_csv(
-                            filepath_or_buffer=file, # extracted_file_path,
+                            filepath_or_buffer=file,
                             sep=';',
                             header=None,
                             dtype=estabelecimento_motivo_dtypes,
@@ -1496,7 +1425,7 @@ def etl_process(processar_simples=True):
                             # Renomear colunas
                             chunk.columns = ['codigo', 'descricao']
 
-                            # Gravar dados no banco usando COPY
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
                                     name='estabelecimento_motivo',
@@ -1518,8 +1447,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        # move_file_error(extracted_file_path, arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1545,14 +1473,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "munic";')
         conn.commit()
 
-        # for arquivo in arquivos_munic:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_munic:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1568,7 +1488,7 @@ def etl_process(processar_simples=True):
 
                         # Processamento em chunks para evitar picos de RAM
                         for i, chunk in enumerate(pd.read_csv(
-                            filepath_or_buffer=file, # extracted_file_path,
+                            filepath_or_buffer=file, 
                             sep=';',
                             header=None,
                             dtype=munic_dtypes,
@@ -1579,7 +1499,7 @@ def etl_process(processar_simples=True):
                             # Renomear colunas
                             chunk.columns = ['codigo', 'descricao']
 
-                            # Gravar dados no banco usando COPY (Alta performance)
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
                                     name='munic',
@@ -1602,8 +1522,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo de municípios {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        # move_file_error(extracted_file_path, arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1629,14 +1548,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "empresa_natureza_juridica";')
         conn.commit()
 
-        # for arquivo in arquivos_empresa_natureza_juridica:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_empresa_natureza_juridica:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1652,7 +1563,7 @@ def etl_process(processar_simples=True):
 
                         # Alterado para leitura em chunks para manter o consumo de RAM estável
                         for i, chunk in enumerate(pd.read_csv(
-                            filepath_or_buffer=file, # extracted_file_path,
+                            filepath_or_buffer=file, 
                             sep=';',
                             header=None,
                             dtype=empresa_natureza_juridica_dtypes,
@@ -1663,7 +1574,7 @@ def etl_process(processar_simples=True):
                             # Renomear colunas
                             chunk.columns = ['codigo', 'descricao']
 
-                            # Gravar dados no banco usando COPY (Alta performance)
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
                                     name='empresa_natureza_juridica',
@@ -1686,8 +1597,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo de empresa_natureza_juridica {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        # move_file_error(extracted_file_path, arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1713,14 +1623,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "pais";')
         conn.commit()
 
-        # for arquivo in arquivos_pais:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_pais:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1736,7 +1638,7 @@ def etl_process(processar_simples=True):
 
                         # Leitura em chunks para estabilidade total da RAM
                         for i, chunk in enumerate(pd.read_csv(
-                            filepath_or_buffer=file, # extracted_file_path,
+                            filepath_or_buffer=file, 
                             sep=';',
                             header=None,
                             dtype=pais_dtypes,
@@ -1747,7 +1649,7 @@ def etl_process(processar_simples=True):
                             # Renomear colunas
                             chunk.columns = ['codigo', 'descricao']
 
-                            # Gravar dados no banco usando COPY (Otimizado para HDD)
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
                                     name='pais',
@@ -1770,8 +1672,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo de países {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        # move_file_error(extracted_file_path, arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1798,14 +1699,6 @@ def etl_process(processar_simples=True):
         cur.execute('TRUNCATE TABLE "socios_qualificacao" ;')
         conn.commit()
 
-        # for arquivo in arquivos_socios_qualificacao:
-        #     logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-        #     extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-        #     if not os.path.exists(extracted_file_path):
-        #         logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-        #         continue
-
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_socios_qualificacao:
             logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
@@ -1821,7 +1714,7 @@ def etl_process(processar_simples=True):
 
                         # Alterado para leitura em chunks para manter o consumo de RAM estável
                         for i, chunk in enumerate(pd.read_csv(
-                            filepath_or_buffer=file, # extracted_file_path,
+                            filepath_or_buffer=file,
                             sep=';',
                             header=None,
                             dtype=socios_qualificacao_dtypes,
@@ -1855,8 +1748,7 @@ def etl_process(processar_simples=True):
                     except Exception as e:
                         logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
                         arquivos_com_erro.append(arquivo)
-                        # move_file_error(extracted_file_path, arquivo)
-                        move_file_error(file, arquivo)
+                        move_file_error(zip_path, arquivo) 
 
                     finally:
                         gc.collect()
@@ -1896,7 +1788,6 @@ def etl_process(processar_simples=True):
 
         # Remover arquivos após a inserção no banco
         # shutil.rmtree(OUTPUT_FILES_PATH)
-        # shutil.rmtree(EXTRACTED_FILES_PATH)
         logger.info("Arquivos removidos após a carga no banco.")
 
         logger.info(f"ETL concluído com sucesso em {converter_segundos(start_time, datetime.now())}")
