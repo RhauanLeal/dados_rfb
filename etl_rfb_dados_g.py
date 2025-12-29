@@ -1895,7 +1895,7 @@ def etl_process(processar_simples=True):
         criar_indices()
 
         # Remover arquivos após a inserção no banco
-        shutil.rmtree(OUTPUT_FILES_PATH)
+        # shutil.rmtree(OUTPUT_FILES_PATH)
         # shutil.rmtree(EXTRACTED_FILES_PATH)
         logger.info("Arquivos removidos após a carga no banco.")
 
