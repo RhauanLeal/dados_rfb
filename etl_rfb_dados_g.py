@@ -1364,7 +1364,7 @@ def etl_process(processar_simples=True):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela estabelecimento_motivo (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "moti" ;')
+        cur.execute('TRUNCATE TABLE "estabelecimento_motivo" ;')
         conn.commit()
 
         for arquivo in arquivos_estabelecimento_motivo:
@@ -1769,6 +1769,14 @@ def etl_process(processar_simples=True):
     except Exception as e:
         logger.error(f"Erro no processo ETL: {e}", exc_info=True)
         logger.critical("Não foi possível iniciar o aplicativo")
+        # Encerramento seguro de recursos
+        try:
+            cur.close()
+            conn.close()
+            engine.dispose()
+            gc.collect()
+        except:
+            pass
         sys.exit(1)
 
 
