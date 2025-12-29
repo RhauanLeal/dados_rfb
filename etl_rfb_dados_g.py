@@ -771,7 +771,7 @@ def criar_indices():
         logger.info("Criando Chave Primária Composta para Estabelecimento...")
         cur.execute("""
             ALTER TABLE public.estabelecimento 
-            ADD PRIMARY KEY (cnpj_basico, cnpj_ordem);
+            ADD PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv);
         """)
 
         # 2. Índices Adicionais (Opcionais, mas recomendados para performance)
