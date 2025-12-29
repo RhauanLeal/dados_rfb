@@ -395,7 +395,7 @@ def create_tables():
                     data_situacao_cadastral date,
                     motivo_situacao_cadastral integer,
                     nome_cidade_exterior text,
-                    pais text,
+                    pais integer,
                     data_inicio_atividade date,
                     cnae_fiscal_principal text,
                     cnae_fiscal_secundaria text,
