@@ -366,8 +366,9 @@ def create_tables():
                 );
 
                 -- Tabela: empresa
+                -- Não possui indice, sera criado ao final por performance
                 CREATE TABLE IF NOT EXISTS public.empresa (
-                    cnpj_basico text PRIMARY KEY,
+                    cnpj_basico text,
                     razao_social text,
                     natureza_juridica text,
                     qualificacao_responsavel text,
@@ -383,6 +384,7 @@ def create_tables():
                 );
 
                 -- Tabela: estabelecimento
+                -- Não possui indice, sera criado ao final por performance
                 CREATE TABLE IF NOT EXISTS public.estabelecimento (
                     cnpj_basico text,
                     cnpj_ordem text,
@@ -414,7 +416,6 @@ def create_tables():
                     correio_eletronico text,
                     situacao_especial text,
                     data_situacao_especial text,
-                    PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
                 );
                             
                 -- Tabela: estabelecimento_situacao_cadastral
@@ -423,8 +424,8 @@ def create_tables():
                     descricao TEXT
                 );
                             
-                -- Tabela: moti
-                CREATE TABLE IF NOT EXISTS public.moti (
+                -- Tabela: estabelecimento_motivo
+                CREATE TABLE IF NOT EXISTS public.estabelecimento_motivo (
                     codigo text PRIMARY KEY,
                     descricao text
                 );
@@ -435,8 +436,8 @@ def create_tables():
                     descricao text
                 );
 
-                -- Tabela: natju
-                CREATE TABLE IF NOT EXISTS public.natju (
+                -- Tabela: empresa_natureza_juridica
+                CREATE TABLE IF NOT EXISTS public.empresa_natureza_juridica (
                     codigo text PRIMARY KEY,
                     descricao text
                 );
@@ -447,15 +448,15 @@ def create_tables():
                     descricao text
                 );
 
-                -- Tabela: quals
-                CREATE TABLE IF NOT EXISTS public.quals (
+                -- Tabela: socios_qualificacao
+                CREATE TABLE IF NOT EXISTS public.socios_qualificacao (
                     codigo text PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: simples
                 CREATE TABLE IF NOT EXISTS public.simples (
-                    cnpj_basico text PRIMARY KEY,
+                    cnpj_basico text,
                     opcao_pelo_simples text,
                     data_opcao_simples text,
                     data_exclusao_simples text,
@@ -466,7 +467,7 @@ def create_tables():
 
                 -- Tabela: socios
                 CREATE TABLE IF NOT EXISTS public.socios (
-                    cnpj_basico text PRIMARY KEY,
+                    cnpj_basico text,
                     identificador_socio text,
                     nome_socio_razao_social text,
                     cpf_cnpj_socio text,
@@ -525,15 +526,15 @@ def create_tables():
                     # Abordagem alternativa: criar tabelas uma por uma
                     tables_sql = [
                         """CREATE TABLE IF NOT EXISTS public.cnae (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text PRIMARY KEY, razao_social text, natureza_juridica text, qualificacao_responsavel text, capital_social double precision, porte_empresa text, ente_federativo_responsavel text);""",
+                        """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text, razao_social text, natureza_juridica text, qualificacao_responsavel text, capital_social double precision, porte_empresa text, ente_federativo_responsavel text);""",
                         """CREATE TABLE IF NOT EXISTS empresa_porte (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial text, nome_fantasia text, situacao_cadastral text, data_situacao_cadastral text, motivo_situacao_cadastral text, nome_cidade_exterior text, pais text, data_inicio_atividade text, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio text, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial text, PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv));""",
+                        """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial text, nome_fantasia text, situacao_cadastral text, data_situacao_cadastral text, motivo_situacao_cadastral text, nome_cidade_exterior text, pais text, data_inicio_atividade text, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio text, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial text);""",
                         """CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.moti (codigo text PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.estabelecimento_motivo (codigo text PRIMARY KEY, descricao text);""",
                         """CREATE TABLE IF NOT EXISTS public.munic (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.natju (codigo text PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.empresa_natureza_juridica (codigo text PRIMARY KEY, descricao text);""",
                         """CREATE TABLE IF NOT EXISTS public.pais (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.quals (codigo text PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.socios_qualificacao (codigo text PRIMARY KEY, descricao text);""",
                         """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text PRIMARY KEY, opcao_pelo_simples text, data_opcao_simples text, data_exclusao_simples text, opcao_mei text, data_opcao_mei text, data_exclusao_mei text);""",
                         """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text PRIMARY KEY, identificador_socio text, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio text, data_entrada_sociedade text, pais text, representante_legal text, nome_do_representante text, qualificacao_representante_legal text, faixa_etaria text);""",
                         """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao TEXT);"""
@@ -723,7 +724,8 @@ def apply_fixes(processar_simples=True):
 
         # 4. CNPJs problemáticos conhecidos no Simples
         if processar_simples:
-            logger.info("Removendo CNPJs inválidos da tabela simples...")
+            logger.info("Limpando registros problemáticos da tabela Simples...")
+            # Aqui usamos DELETE normal. Como não tem PK, ele funciona sem erros.
             cur.execute("""
                 DELETE FROM public.simples 
                 WHERE cnpj_basico IN ('24417449', '24539162', '30721933', '30728066', 
@@ -758,17 +760,34 @@ def criar_indices():
 
         logger.info("Iniciando criação dos índices...")
 
+        # 1. Criar a Chave Primária (Isso cria o índice principal do CNPJ)
+        # Usamos o comando ALTER TABLE. Isso pode demorar algumas horas no HDD, mas é o correto.
+        logger.info("Criando Chave Primária para empresa...")
+        cur.execute("""
+            ALTER TABLE public.empresa
+            ADD PRIMARY KEY (cnpj_basico);
+        """)
+
+        logger.info("Criando Chave Primária Composta para Estabelecimento...")
+        cur.execute("""
+            ALTER TABLE public.estabelecimento 
+            ADD PRIMARY KEY (cnpj_basico, cnpj_ordem);
+        """)
+
+        # 2. Índices Adicionais (Opcionais, mas recomendados para performance)
+        # Se você for buscar empresas por Município ou por CNAE:
         # Lista expandida para garantir performance em buscas reais
-        indices = [
-            ("empresa", "cnpj_basico"),
-            ("estabelecimento", "cnpj_basico"),
-            ("socios", "cnpj_basico"),
-            ("simples", "cnpj_basico"),
+        indices_extras = [
+            ("empresa", "porte_empresa"),
+            ("estabelecimento", "situacao_cadastral"),
+            ("estabelecimento", "cnae_fiscal_principal"),
+            ("estabelecimento", "municipio"),
+            ("estabelecimento", "uf"),
             ("cnae", "codigo"),
             ("munic", "codigo")
         ]
 
-        for tabela, coluna in indices:
+        for tabela, coluna in indices_extras:
             nome_indice = f"idx_{tabela}_{coluna}"
             try:
                 logger.info(f"Criando índice {nome_indice}...")
@@ -841,11 +860,11 @@ def etl_process(processar_simples=True):
         arquivos_socios = []
         arquivos_simples = []
         arquivos_cnae = []
-        arquivos_moti = []
+        arquivos_estabelecimento_motivo = []
         arquivos_munic = []
-        arquivos_natju = []
+        arquivos_empresa_natureza_juridica = []
         arquivos_pais = []
-        arquivos_quals = []
+        arquivos_socios_qualificacao = []
 
         # Arquivos com erro no processamento
         arquivos_com_erro = []
@@ -862,15 +881,15 @@ def etl_process(processar_simples=True):
             elif "CNAE" in file:
                 arquivos_cnae.append(file)
             elif "MOTI" in file:
-                arquivos_moti.append(file)
+                arquivos_estabelecimento_motivo.append(file)
             elif "MUNIC" in file:
                 arquivos_munic.append(file)
             elif "NATJU" in file:
-                arquivos_natju.append(file)
+                arquivos_empresa_natureza_juridica.append(file)
             elif "PAIS" in file:
                 arquivos_pais.append(file)
             elif "QUALS" in file:
-                arquivos_quals.append(file)
+                arquivos_socios_qualificacao.append(file)
 
         # deixar em ordem alfabética
         arquivos_empresa.sort()
@@ -878,11 +897,11 @@ def etl_process(processar_simples=True):
         arquivos_socios.sort()
         arquivos_simples.sort()
         arquivos_cnae.sort()
-        arquivos_moti.sort()
+        arquivos_estabelecimento_motivo.sort()
         arquivos_munic.sort()
-        arquivos_natju.sort()
+        arquivos_empresa_natureza_juridica.sort()
         arquivos_pais.sort()
-        arquivos_quals.sort()
+        arquivos_socios_qualificacao.sort()
         
         # Criar tabelas antes de inserir dados
         create_tables()
@@ -1309,11 +1328,11 @@ def etl_process(processar_simples=True):
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
-        logger.info("Limpando dados da tabela moti (mantendo estrutura)...")
+        logger.info("Limpando dados da tabela estabelecimento_motivo (mantendo estrutura)...")
         cur.execute('TRUNCATE TABLE "moti" ;')
         conn.commit()
 
-        for arquivo in arquivos_moti:
+        for arquivo in arquivos_estabelecimento_motivo:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
@@ -1322,7 +1341,7 @@ def etl_process(processar_simples=True):
                 continue
 
             try:
-                moti_dtypes = {
+                estabelecimento_motivo_dtypes = {
                     0: 'Int32',
                     1: object
                 }
@@ -1332,7 +1351,7 @@ def etl_process(processar_simples=True):
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
-                    dtype=moti_dtypes,
+                    dtype=estabelecimento_motivo_dtypes,
                     encoding='latin-1',
                     chunksize=CHUNK_ROWS
                 )):
@@ -1343,7 +1362,7 @@ def etl_process(processar_simples=True):
                     # Gravar dados no banco usando COPY
                     try:
                         chunk.to_sql(
-                            name='moti',
+                            name='estabelecimento_motivo',
                             con=engine,
                             if_exists='append',
                             index=False,
@@ -1352,7 +1371,7 @@ def etl_process(processar_simples=True):
                         logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                     except Exception as e:
-                        logger.error(f"Erro ao inserir chunk {i} de MOTI: {e}")
+                        logger.error(f"Erro ao inserir chunk {i} de estabelecimento_motivo: {e}")
                         break
 
                     finally:
@@ -1367,7 +1386,7 @@ def etl_process(processar_simples=True):
             finally:
                 gc.collect()
 
-        logger.info("Arquivos de moti finalizados!")
+        logger.info("Arquivos de estabelecimento_motivo finalizados!")
 
         # Encerramento seguro de recursos
         try:
@@ -1460,11 +1479,11 @@ def etl_process(processar_simples=True):
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
-        logger.info("Limpando dados da tabela natju (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "natju";')
+        logger.info("Limpando dados da tabela empresa_natureza_juridica (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "empresa_natureza_juridica";')
         conn.commit()
 
-        for arquivo in arquivos_natju:
+        for arquivo in arquivos_empresa_natureza_juridica:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
@@ -1473,7 +1492,7 @@ def etl_process(processar_simples=True):
                 continue
 
             try:
-                natju_dtypes = {
+                empresa_natureza_juridica_dtypes = {
                     0: 'Int32',
                     1: object
                 }
@@ -1483,7 +1502,7 @@ def etl_process(processar_simples=True):
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
-                    dtype=natju_dtypes,
+                    dtype=empresa_natureza_juridica_dtypes,
                     encoding='latin-1',
                     chunksize=CHUNK_ROWS
                 )):
@@ -1494,7 +1513,7 @@ def etl_process(processar_simples=True):
                     # Gravar dados no banco usando COPY (Alta performance)
                     try:
                         chunk.to_sql(
-                            name='natju',
+                            name='empresa_natureza_juridica',
                             con=engine,
                             if_exists='append',
                             index=False,
@@ -1503,7 +1522,7 @@ def etl_process(processar_simples=True):
                         logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
                     except Exception as e:
-                        logger.error(f"Erro ao inserir chunk {i} de NATJU: {e}")
+                        logger.error(f"Erro ao inserir chunk {i} de empresa_natureza_juridica: {e}")
                         break
 
                     finally:
@@ -1512,14 +1531,14 @@ def etl_process(processar_simples=True):
                         gc.collect()
 
             except Exception as e:
-                logger.error(f"Erro ao processar o arquivo de natju {arquivo}: {e}")
+                logger.error(f"Erro ao processar o arquivo de empresa_natureza_juridica {arquivo}: {e}")
                 arquivos_com_erro.append(arquivo)
                 move_file_error(extracted_file_path, arquivo)
 
             finally:
                 gc.collect()
 
-        logger.info("Arquivos de natju finalizados!")
+        logger.info("Arquivos de empresa_natureza_juridica finalizados!")
 
         # Encerramento seguro de recursos
         try:
@@ -1613,11 +1632,11 @@ def etl_process(processar_simples=True):
 
         # Arquivos de qualificação de sócios:
         # Limpa a tabela antes do insert
-        logger.info("Limpando dados da tabela quals (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "quals" ;')
+        logger.info("Limpando dados da tabela socios_qualificacao (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "socios_qualificacao" ;')
         conn.commit()
 
-        for arquivo in arquivos_quals:
+        for arquivo in arquivos_socios_qualificacao:
             logger.info(f"Trabalhando no arquivo: {arquivo}")
 
             extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
@@ -1626,7 +1645,7 @@ def etl_process(processar_simples=True):
                 continue
 
             try:
-                quals_dtypes = {
+                socios_qualificacao_dtypes = {
                     0: 'Int32',
                     1: object
                 }
@@ -1636,7 +1655,7 @@ def etl_process(processar_simples=True):
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
-                    dtype=quals_dtypes,
+                    dtype=socios_qualificacao_dtypes,
                     encoding='latin-1',
                     chunksize=CHUNK_ROWS
                 )):
@@ -1647,7 +1666,7 @@ def etl_process(processar_simples=True):
                     # Gravar dados no banco usando COPY (Alta performance para HDD)
                     try:
                         chunk.to_sql(
-                            name='quals',
+                            name='socios_qualificacao',
                             con=engine,
                             if_exists='append',
                             index=False,
@@ -1656,7 +1675,7 @@ def etl_process(processar_simples=True):
                         logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                     except Exception as e:
-                        logger.error(f"Erro ao inserir chunk {i} de QUALS: {e}")
+                        logger.error(f"Erro ao inserir chunk {i} de socios_qualificacao: {e}")
                         break
 
                     finally:
@@ -1672,7 +1691,7 @@ def etl_process(processar_simples=True):
             finally:
                 gc.collect()
 
-        logger.info("Arquivos de quals finalizados!")
+        logger.info("Arquivos de socios_qualificacao finalizados!")
 
         # Encerramento seguro de recursos
         try:
