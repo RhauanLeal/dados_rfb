@@ -370,10 +370,10 @@ def create_tables():
                 CREATE TABLE IF NOT EXISTS public.empresa (
                     cnpj_basico text,
                     razao_social text,
-                    natureza_juridica text,
-                    qualificacao_responsavel text,
+                    natureza_juridica integer,
+                    qualificacao_responsavel integer,
                     capital_social double precision,
-                    porte_empresa text,
+                    porte_empresa integer,
                     ente_federativo_responsavel text
                 );
                             
@@ -389,11 +389,11 @@ def create_tables():
                     cnpj_basico text,
                     cnpj_ordem text,
                     cnpj_dv text,
-                    identificador_matriz_filial text,
+                    identificador_matriz_filial integer,
                     nome_fantasia text,
-                    situacao_cadastral text,
+                    situacao_cadastral integer,
                     data_situacao_cadastral date,
-                    motivo_situacao_cadastral text,
+                    motivo_situacao_cadastral integer,
                     nome_cidade_exterior text,
                     pais text,
                     data_inicio_atividade date,
@@ -406,7 +406,7 @@ def create_tables():
                     bairro text,
                     cep text,
                     uf text,
-                    municipio text,
+                    municipio integer,
                     ddd_1 text,
                     telefone_1 text,
                     ddd_2 text,
@@ -426,31 +426,31 @@ def create_tables():
                             
                 -- Tabela: estabelecimento_motivo
                 CREATE TABLE IF NOT EXISTS public.estabelecimento_motivo (
-                    codigo text PRIMARY KEY,
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: munic
                 CREATE TABLE IF NOT EXISTS public.munic (
-                    codigo text PRIMARY KEY,
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: empresa_natureza_juridica
                 CREATE TABLE IF NOT EXISTS public.empresa_natureza_juridica (
-                    codigo text PRIMARY KEY,
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: pais
                 CREATE TABLE IF NOT EXISTS public.pais (
-                    codigo text PRIMARY KEY,
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: socios_qualificacao
                 CREATE TABLE IF NOT EXISTS public.socios_qualificacao (
-                    codigo text PRIMARY KEY,
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
@@ -468,16 +468,16 @@ def create_tables():
                 -- Tabela: socios
                 CREATE TABLE IF NOT EXISTS public.socios (
                     cnpj_basico text,
-                    identificador_socio text,
+                    identificador_socio integer,
                     nome_socio_razao_social text,
                     cpf_cnpj_socio text,
-                    qualificacao_socio text,
+                    qualificacao_socio integer,
                     data_entrada_sociedade date,
-                    pais text,
+                    pais integer,
                     representante_legal text,
                     nome_do_representante text,
-                    qualificacao_representante_legal text,
-                    faixa_etaria text
+                    qualificacao_representante_legal integer,
+                    faixa_etaria integer
                 );
 
                 -- Tabela: socios_identificador
@@ -526,18 +526,18 @@ def create_tables():
                     # Abordagem alternativa: criar tabelas uma por uma
                     tables_sql = [
                         """CREATE TABLE IF NOT EXISTS public.cnae (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text, razao_social text, natureza_juridica text, qualificacao_responsavel text, capital_social double precision, porte_empresa text, ente_federativo_responsavel text);""",
+                        """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text, razao_social text, natureza_juridica integer, qualificacao_responsavel integer, capital_social double precision, porte_empresa integer, ente_federativo_responsavel text);""",
                         """CREATE TABLE IF NOT EXISTS empresa_porte (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial text, nome_fantasia text, situacao_cadastral text, data_situacao_cadastral date, motivo_situacao_cadastral text, nome_cidade_exterior text, pais text, data_inicio_atividade date, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio text, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial date);""",
+                        """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial integer, nome_fantasia text, situacao_cadastral integer, data_situacao_cadastral date, motivo_situacao_cadastral integer, nome_cidade_exterior text, pais integer, data_inicio_atividade date, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio integer, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial date);""",
                         """CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.estabelecimento_motivo (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.munic (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.empresa_natureza_juridica (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.pais (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.socios_qualificacao (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text PRIMARY KEY, opcao_pelo_simples text, data_opcao_simples date, data_exclusao_simples date, opcao_mei text, data_opcao_mei date, data_exclusao_mei date);""",
-                        """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text PRIMARY KEY, identificador_socio text, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio text, data_entrada_sociedade date, pais text, representante_legal text, nome_do_representante text, qualificacao_representante_legal text, faixa_etaria text);""",
-                        """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao TEXT);"""
+                        """CREATE TABLE IF NOT EXISTS public.estabelecimento_motivo (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.munic (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.empresa_natureza_juridica (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.pais (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.socios_qualificacao (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text, opcao_pelo_simples text, data_opcao_simples date, data_exclusao_simples date, opcao_mei text, data_opcao_mei date, data_exclusao_mei date);""",
+                        """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text, identificador_socio integer, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio integer, data_entrada_sociedade date, pais integer, representante_legal text, nome_do_representante text, qualificacao_representante_legal integer, faixa_etaria integer);""",
+                        """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao text);"""
                     ]
                     
                     for sql in tables_sql:
@@ -682,13 +682,25 @@ def apply_fixes(processar_simples=True):
         logger.info("Inserindo correções em pais...")
         cur.execute("""
             INSERT INTO public.pais (codigo, descricao) 
-            VALUES ('008', 'ABU DHABI'), ('009', 'DIRCE'), ('015', 'ALAND, ILHAS'),
-                   ('150', 'JERSEY, ILHA DO CANAL'), ('151', 'CANARIAS, ILHAS'), ('200', 'CURACAO'),
-                   ('321', 'GUERNSEY'), ('359', 'MAN, ILHA DE'), ('367', 'INGLATERRA'),
-                   ('393', 'JERSEY'), ('449', 'MACEDONIA (ANTIGA REP. IUGOSLAVA)'),
-                   ('452', 'MADEIRA, ILHA DA'), ('498', 'MOLDAVIA'), ('578', 'PALESTINA'),
-                   ('678', 'SAO TOME E PRINCIPE'), ('699', 'SAO MARTINHO, ILHA DE (PARTE HOLANDESA)'),
-                   ('737', 'SERVIA'), ('994', 'AZerbaijao')
+            VALUES 
+                (008, 'ABU DHABI'),
+                (009, 'DIRCE'),
+                (015, 'ALAND, ILHAS'),
+                (150, 'JERSEY, ILHA DO CANAL'),
+                (151, 'CANARIAS, ILHAS'),
+                (200, 'CURACAO'),
+                (321, 'GUERNSEY'),
+                (359, 'MAN, ILHA DE'),
+                (367, 'INGLATERRA'),
+                (393, 'JERSEY'),
+                (449, 'MACEDONIA (ANTIGA REP. IUGOSLAVA)'),
+                (452, 'MADEIRA, ILHA DA'),
+                (498, 'MOLDAVIA'),
+                (578, 'PALESTINA'),
+                (678, 'SAO TOME E PRINCIPE'),
+                (699, 'SAO MARTINHO, ILHA DE (PARTE HOLANDESA)'),
+                (737, 'SERVIA'),
+                (994, 'AZERBAIJAO')
             ON CONFLICT (codigo) DO NOTHING;
         """)
 
@@ -960,9 +972,7 @@ def etl_process(processar_simples=True):
                                 'qualificacao_responsavel', 'capital_social', 
                                 'porte_empresa', 'ente_federativo_responsavel']
 
-                # # Tratamento de capital social otimizado
-                # chunk['capital_social'] = chunk['capital_social'].astype(str).str.replace(',', '.').replace('nan', '0').astype(float).fillna(0.0)
-
+                # Tratamento de capital social otimizado
                 chunk['capital_social'] = chunk['capital_social'].apply(parse_brazilian_float)
 
                 try:
@@ -1020,11 +1030,11 @@ def etl_process(processar_simples=True):
             try:
                 # Dtypes para evitar que o Pandas tente adivinhar e consuma RAM
                 estabelecimento_dtypes = {
-                    0: object, 1: object, 2: object, 3: 'Int32', 4: object, 5: 'Int32', 6: 'Int32',
-                    7: 'Int32', 8: object, 9: object, 10: object, 11: object, 12: object, 13: object,
+                    0: object, 1: object, 2: object, 3: 'Int32', 4: object, 5: 'Int32', 6: object,
+                    7: 'Int32', 8: object, 9: 'Int32', 10: object, 11: object, 12: object, 13: object,
                     14: object, 15: object, 16: object, 17: object, 18: object, 19: object,
                     20: 'Int32', 21: object, 22: object, 23: object, 24: object, 25: object,
-                    26: object, 27: object, 28: object, 29: 'Int32'
+                    26: object, 27: object, 28: object, 29: object
                 }
 
                 for i, chunk in enumerate(pd.read_csv(
@@ -1050,8 +1060,7 @@ def etl_process(processar_simples=True):
                     # --- TRATAMENTO DE DATAS (Opcional, mas evita erros no Postgres) ---
                     # Converte YYYYMMDD para YYYY-MM-DD ou None se zero/inválido
                     colunas_datas = ['data_situacao_cadastral', 'data_inicio_atividade', 'data_situacao_especial']
-                    # for col in colunas_datas:
-                    #     chunk[col] = pd.to_datetime(chunk[col], format='%Y%m%d', errors='coerce')
+
                     chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d',errors='coerce'))
 
                     try:
@@ -1137,14 +1146,8 @@ def etl_process(processar_simples=True):
                         'faixa_etaria'
                     ]
 
-                    # Tratamento de data: Converte YYYYMMDD para formato de data real
-                    # chunk['data_entrada_sociedade'] = pd.to_datetime(
-                    #     chunk['data_entrada_sociedade'], 
-                    #     format='%Y%m%d', 
-                    #     errors='coerce'
-                    # )
-
-                    # Tratamento de Datas
+                    # --- TRATAMENTO DE DATAS (Opcional, mas evita erros no Postgres) ---
+                    # Converte YYYYMMDD para YYYY-MM-DD ou None se zero/inválido
                     colunas_datas = ['data_entrada_sociedade']
                     
                     chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d',errors='coerce'))
@@ -1240,16 +1243,13 @@ def etl_process(processar_simples=True):
                             'data_exclusao_mei'
                         ]
 
-                        # Tratamento de Datas: Converte '00000000' em Nat (None no banco)
+                        # --- TRATAMENTO DE DATAS (Opcional, mas evita erros no Postgres) ---
+                        # Converte YYYYMMDD para YYYY-MM-DD ou None se zero/inválido
                         colunas_datas = [
                             'data_opcao_simples', 'data_exclusao_simples', 
                             'data_opcao_mei', 'data_exclusao_mei'
                         ]
                         
-                        # for col in colunas_datas:
-                        #     # errors='coerce' transforma o que não é data (como 00000000) em nulo
-                        #     chunk[col] = pd.to_datetime(chunk[col], format='%Y%m%d', errors='coerce')
-
                         chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d', errors='coerce'))
 
                         # Gravar dados no banco usando o método COPY
@@ -1306,12 +1306,17 @@ def etl_process(processar_simples=True):
                 continue
 
             try:
+                cnae_dtypes = {
+                    0: object,
+                    1: object
+                }
+
                 # Adicionado chunksize para manter o consumo de RAM constante e baixo
                 for i, chunk in enumerate(pd.read_csv(
                     filepath_or_buffer=extracted_file_path,
                     sep=';',
                     header=None,
-                    dtype='object',
+                    dtype=cnae_dtypes,
                     encoding='latin-1',
                     chunksize=CHUNK_ROWS # Mantém o padrão de segurança
                 )):
