@@ -12,16 +12,13 @@ services:
       - ../dados_rfb_env/.env
     environment:
       - TZ=America/Boa_Vista
+      - MEMORY_LIMIT=8G  # Informa ao script Python
     restart: no
     # === LIMITES DE MEMÓRIA ===
     mem_limit: 8g            # Máximo 8GB (50% da VM)
     mem_reservation: 4g      # Reserva mínima 4GB
-    memswap_limit: 12g       # Máximo total (RAM+Swap) = 12GB
-    mem_swappiness: 10       # Baixa prioridade para swap
     # === OTIMIZAÇÕES DOCKER ===
-    shm_size: '2gb'        # Pandas precisa de shared memory
-    tmpfs:
-      - /tmp:size=4G,mode=1777  # tmpfs para IO rápido
+    shm_size: '1gb'                   # Suficiente para pandas
     ulimits:
       nproc: 65535
       nofile:
