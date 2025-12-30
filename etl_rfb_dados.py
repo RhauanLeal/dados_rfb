@@ -14,6 +14,10 @@ from sqlalchemy import create_engine
 from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from bs4 import BeautifulSoup
 from datetime import datetime
+import io
+import csv
+import psutil
+
 '''
 Sistema de importação dos dados abertos da Receita Federal do Brasil (RFB)
 * arquivos baixados via HTTP são armazenados localmente,
@@ -49,15 +53,7 @@ logger = logging.getLogger(__name__)
 # Diretórios fixos para armazenar os arquivos
 BASE_DIR = pathlib.Path().resolve()  # Diretório do script
 OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
-EXTRACTED_FILES_PATH = BASE_DIR / "files_extracted"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
-
-# Tamanho padrão de chunk para leitura dos arquivos grandes
-CHUNK_ROWS  = 1_000_000  # 1 milhão de linhas por chunk (leitura)
-CHUNK_TO_SQL= 10_000     # 10 mil linhas por insert no to_sql (insert)
-
-logger.info("================================================================================")
-logger.info("Iniciando ETL - dados_rfb")
 
 # carrega o arquivo de configuração .env
 # Caminho relativo, subindo um nível para acessar dados_rfb/.env
@@ -65,6 +61,9 @@ ENV_PATH_PARENT = BASE_DIR.parent / "dados_rfb_env" / ".env"
 
 # Fallback: .env dentro do próprio projeto (dev/teste)
 ENV_PATH_LOCAL = BASE_DIR / ".env"
+
+logger.info("================================================================================")
+logger.info("Iniciando ETL - dados_rfb G")
 
 # Lógica automática:
 if os.path.exists(ENV_PATH_PARENT):
@@ -79,6 +78,42 @@ if not dotenv_path:
 
 # Carrega o arquivo
 load_dotenv(dotenv_path)
+
+
+def calcular_chunks_automatico():
+    """Calcula chunks ideais baseado na RAM disponível"""
+     
+    mem = psutil.virtual_memory()
+    ram_gb = mem.total / (1024**3)
+    available_gb = mem.available / (1024**3)
+    
+    logger.info(f"RAM total: {ram_gb:.1f}GB, Disponível: {available_gb:.1f}GB")
+    
+    if available_gb > 4:
+        return 2_000_000, 100_000
+    else:
+        return 1_000_000, 50_000
+
+CHUNK_ROWS, CHUNK_TO_SQL = calcular_chunks_automatico()
+logger.info(f"Usando CHUNK_ROWS={CHUNK_ROWS:,}, CHUNK_TO_SQL={CHUNK_TO_SQL:,}")
+
+
+def psql_insert_copy(table, conn, keys, data_iter):
+    """
+    Função de callback para o pandas.to_sql que utiliza o comando COPY do PostgreSQL.
+    """
+    # Configura o buffer de memória
+    s_buf = io.StringIO()
+    writer = csv.writer(s_buf, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
+    writer.writerows(data_iter)
+    s_buf.seek(0)
+
+    # Acessa o cursor do driver psycopg2 bruto
+    dbapi_conn = conn.connection
+    with dbapi_conn.cursor() as cur:
+        sql = f'COPY "{table.name}" ({", ".join([f'"{k}"' for k in keys])}) FROM STDIN WITH DELIMITER \'\t\' CSV'
+        cur.copy_expert(sql=sql, file=s_buf)
+
 
 def converter_segundos(tempo_inicial: datetime, tempo_final: datetime) -> str:
     '''
@@ -242,6 +277,13 @@ def verificar_nova_atualizacao():
         conn, engine = connect_db()
         cur = conn.cursor()
 
+        # PRIMEIRO: Verifica se a tabela tem alguma linha
+        cur.execute("SELECT COUNT(*) FROM info_dados;")
+        total_linhas = cur.fetchone()[0]
+        
+        # Define update = True se já existem linhas, False se tabela está vazia
+        update = total_linhas > 0
+
         cur.execute("""
             SELECT 1 FROM info_dados
             WHERE ano = %s AND mes = %s AND data_atualizacao = %s
@@ -261,7 +303,8 @@ def verificar_nova_atualizacao():
         'ano': ano,
         'mes': mes,
         'data_atualizacao': data_atualizacao,
-        'url': f"https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/{ano}-{mes:02d}/"
+        'url': f"https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/{ano}-{mes:02d}/",
+        'update': update
     }
 
 
@@ -346,35 +389,37 @@ def create_tables():
                 );
 
                 -- Tabela: empresa
+                -- Não possui indice, sera criado ao final por performance
                 CREATE TABLE IF NOT EXISTS public.empresa (
-                    cnpj_basico text PRIMARY KEY,
+                    cnpj_basico text,
                     razao_social text,
-                    natureza_juridica text,
-                    qualificacao_responsavel text,
+                    natureza_juridica integer,
+                    qualificacao_responsavel integer,
                     capital_social double precision,
-                    porte_empresa text,
+                    porte_empresa integer,
                     ente_federativo_responsavel text
                 );
                             
                 -- Tabela: empresa_porte
-                CREATE TABLE IF NOT EXISTS empresa_porte (
+                CREATE TABLE IF NOT EXISTS public.empresa_porte (
                     codigo INTEGER PRIMARY KEY,
                     descricao TEXT
                 );
 
                 -- Tabela: estabelecimento
+                -- Não possui indice, sera criado ao final por performance
                 CREATE TABLE IF NOT EXISTS public.estabelecimento (
                     cnpj_basico text,
                     cnpj_ordem text,
                     cnpj_dv text,
-                    identificador_matriz_filial text,
+                    identificador_matriz_filial integer,
                     nome_fantasia text,
-                    situacao_cadastral text,
-                    data_situacao_cadastral text,
-                    motivo_situacao_cadastral text,
+                    situacao_cadastral integer,
+                    data_situacao_cadastral date,
+                    motivo_situacao_cadastral integer,
                     nome_cidade_exterior text,
-                    pais text,
-                    data_inicio_atividade text,
+                    pais integer,
+                    data_inicio_atividade date,
                     cnae_fiscal_principal text,
                     cnae_fiscal_secundaria text,
                     tipo_logradouro text,
@@ -384,7 +429,7 @@ def create_tables():
                     bairro text,
                     cep text,
                     uf text,
-                    municipio text,
+                    municipio integer,
                     ddd_1 text,
                     telefone_1 text,
                     ddd_2 text,
@@ -393,74 +438,73 @@ def create_tables():
                     fax text,
                     correio_eletronico text,
                     situacao_especial text,
-                    data_situacao_especial text,
-                    PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv)
+                    data_situacao_especial date
                 );
                             
                 -- Tabela: estabelecimento_situacao_cadastral
-                CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (
+                CREATE TABLE IF NOT EXISTS public.estabelecimento_situacao_cadastral (
                     codigo INTEGER PRIMARY KEY,
                     descricao TEXT
                 );
                             
-                -- Tabela: moti
-                CREATE TABLE IF NOT EXISTS public.moti (
-                    codigo text PRIMARY KEY,
+                -- Tabela: estabelecimento_motivo
+                CREATE TABLE IF NOT EXISTS public.estabelecimento_motivo (
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: munic
                 CREATE TABLE IF NOT EXISTS public.munic (
-                    codigo text PRIMARY KEY,
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
-                -- Tabela: natju
-                CREATE TABLE IF NOT EXISTS public.natju (
-                    codigo text PRIMARY KEY,
+                -- Tabela: empresa_natureza_juridica
+                CREATE TABLE IF NOT EXISTS public.empresa_natureza_juridica (
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: pais
                 CREATE TABLE IF NOT EXISTS public.pais (
-                    codigo text PRIMARY KEY,
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
-                -- Tabela: quals
-                CREATE TABLE IF NOT EXISTS public.quals (
-                    codigo text PRIMARY KEY,
+                -- Tabela: socios_qualificacao
+                CREATE TABLE IF NOT EXISTS public.socios_qualificacao (
+                    codigo INTEGER PRIMARY KEY,
                     descricao text
                 );
 
                 -- Tabela: simples
                 CREATE TABLE IF NOT EXISTS public.simples (
-                    cnpj_basico text PRIMARY KEY,
+                    cnpj_basico text,
                     opcao_pelo_simples text,
-                    data_opcao_simples text,
-                    data_exclusao_simples text,
+                    data_opcao_simples date,
+                    data_exclusao_simples date,
                     opcao_mei text,
-                    data_opcao_mei text,
-                    data_exclusao_mei text
+                    data_opcao_mei date,
+                    data_exclusao_mei date
                 );
 
                 -- Tabela: socios
                 CREATE TABLE IF NOT EXISTS public.socios (
-                    cnpj_basico text PRIMARY KEY,
-                    identificador_socio text,
+                    cnpj_basico text,
+                    identificador_socio integer,
                     nome_socio_razao_social text,
                     cpf_cnpj_socio text,
-                    qualificacao_socio text,
-                    data_entrada_sociedade text,
-                    pais text,
+                    qualificacao_socio integer,
+                    data_entrada_sociedade date,
+                    pais integer,
                     representante_legal text,
                     nome_do_representante text,
-                    qualificacao_representante_legal text,
-                    faixa_etaria text
+                    qualificacao_representante_legal integer,
+                    faixa_etaria integer
                 );
 
                 -- Tabela: socios_identificador
-                CREATE TABLE IF NOT EXISTS socios_identificador (
+                CREATE TABLE IF NOT EXISTS public.socios_identificador (
                     codigo INTEGER PRIMARY KEY,
                     descricao TEXT
                 );
@@ -505,18 +549,18 @@ def create_tables():
                     # Abordagem alternativa: criar tabelas uma por uma
                     tables_sql = [
                         """CREATE TABLE IF NOT EXISTS public.cnae (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text PRIMARY KEY, razao_social text, natureza_juridica text, qualificacao_responsavel text, capital_social double precision, porte_empresa text, ente_federativo_responsavel text);""",
+                        """CREATE TABLE IF NOT EXISTS public.empresa (cnpj_basico text, razao_social text, natureza_juridica integer, qualificacao_responsavel integer, capital_social double precision, porte_empresa integer, ente_federativo_responsavel text);""",
                         """CREATE TABLE IF NOT EXISTS empresa_porte (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial text, nome_fantasia text, situacao_cadastral text, data_situacao_cadastral text, motivo_situacao_cadastral text, nome_cidade_exterior text, pais text, data_inicio_atividade text, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio text, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial text, PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv));""",
+                        """CREATE TABLE IF NOT EXISTS public.estabelecimento (cnpj_basico text, cnpj_ordem text, cnpj_dv text, identificador_matriz_filial integer, nome_fantasia text, situacao_cadastral integer, data_situacao_cadastral date, motivo_situacao_cadastral integer, nome_cidade_exterior text, pais integer, data_inicio_atividade date, cnae_fiscal_principal text, cnae_fiscal_secundaria text, tipo_logradouro text, logradouro text, numero text, complemento text, bairro text, cep text, uf text, municipio integer, ddd_1 text, telefone_1 text, ddd_2 text, telefone_2 text, ddd_fax text, fax text, correio_eletronico text, situacao_especial text, data_situacao_especial date);""",
                         """CREATE TABLE IF NOT EXISTS estabelecimento_situacao_cadastral (codigo INTEGER PRIMARY KEY, descricao TEXT);""",
-                        """CREATE TABLE IF NOT EXISTS public.moti (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.munic (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.natju (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.pais (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.quals (codigo text PRIMARY KEY, descricao text);""",
-                        """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text PRIMARY KEY, opcao_pelo_simples text, data_opcao_simples text, data_exclusao_simples text, opcao_mei text, data_opcao_mei text, data_exclusao_mei text);""",
-                        """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text PRIMARY KEY, identificador_socio text, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio text, data_entrada_sociedade text, pais text, representante_legal text, nome_do_representante text, qualificacao_representante_legal text, faixa_etaria text);""",
-                        """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao TEXT);"""
+                        """CREATE TABLE IF NOT EXISTS public.estabelecimento_motivo (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.munic (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.empresa_natureza_juridica (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.pais (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.socios_qualificacao (codigo INTEGER PRIMARY KEY, descricao text);""",
+                        """CREATE TABLE IF NOT EXISTS public.simples (cnpj_basico text, opcao_pelo_simples text, data_opcao_simples date, data_exclusao_simples date, opcao_mei text, data_opcao_mei date, data_exclusao_mei date);""",
+                        """CREATE TABLE IF NOT EXISTS public.socios (cnpj_basico text, identificador_socio integer, nome_socio_razao_social text, cpf_cnpj_socio text, qualificacao_socio integer, data_entrada_sociedade date, pais integer, representante_legal text, nome_do_representante text, qualificacao_representante_legal integer, faixa_etaria integer);""",
+                        """CREATE TABLE IF NOT EXISTS socios_identificador (codigo INTEGER PRIMARY KEY, descricao text);"""
                     ]
                     
                     for sql in tables_sql:
@@ -573,16 +617,21 @@ def inserir_info_dados(info):
 
 
 # traz a lista de arquivos da url
-def get_files(base_url):
+def get_files(base_url, processar_simples=True):
     response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
     
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        logger.info(f"Baixando arquivos do mês: {base_url}")
-
         # Identificar arquivos ZIP disponíveis para download
         files = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".zip")]
+
+        logger.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
+
+        # Se processar_simples for False, remove arquivos que contenham 'Simples' no nome
+        if not processar_simples:
+            logger.info("Ignorando arquivo do Simples")
+            files = [f for f in files if "Simples" not in f and "SIMPLES" not in f]
 
         if not files:
             logger.info("Nenhum arquivo .zip encontrado para o mês atual.")
@@ -633,65 +682,228 @@ def download_file(url, output_path):
     return file_name
 
 
-# Função para extrair arquivos ZIP
-def extract_files(zip_path, extract_to):
-    logger.info(f"Extraindo {zip_path} para {extract_to}...")
-    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-        zip_ref.extractall(extract_to)
+def apply_fixes(processar_simples=True):
+    """
+    Aplica correções estáticas na base de dados.
+    """
+    # É recomendável rodar isso ANTES de criar os índices para ser mais rápido
+    conn, engine = connect_db()
+    cur = conn.cursor()
+
+    try:
+        logger.info("APLICANDO CORREÇÕES NA BASE DE DADOS...")
+
+        # Inserções simples (Tabelas auxiliares são pequenas, aqui é instantâneo)
+        # Corrigindo Países
+        logger.info("Inserindo correções em pais...")
+        cur.execute("""
+            INSERT INTO public.pais (codigo, descricao) 
+            VALUES 
+                (008, 'ABU DHABI'),
+                (009, 'DIRCE'),
+                (015, 'ALAND, ILHAS'),
+                (150, 'JERSEY, ILHA DO CANAL'),
+                (151, 'CANARIAS, ILHAS'),
+                (200, 'CURACAO'),
+                (321, 'GUERNSEY'),
+                (359, 'MAN, ILHA DE'),
+                (367, 'INGLATERRA'),
+                (393, 'JERSEY'),
+                (449, 'MACEDONIA (ANTIGA REP. IUGOSLAVA)'),
+                (452, 'MADEIRA, ILHA DA'),
+                (498, 'MOLDAVIA'),
+                (578, 'PALESTINA'),
+                (678, 'SAO TOME E PRINCIPE'),
+                (699, 'SAO MARTINHO, ILHA DE (PARTE HOLANDESA)'),
+                (737, 'SERVIA'),
+                (994, 'AZERBAIJAO')
+            ON CONFLICT (codigo) DO NOTHING;
+        """)
+
+        # # 1. DELETE Duplicatas - CUIDADO: Pode demorar muito se a tabela empresa for grande
+        # logger.info("Removendo duplicatas da tabela empresa...")
+        # query_delete_duplicatas = """
+        #     DELETE FROM empresa
+        #     WHERE ctid IN (
+        #         SELECT ctid FROM (
+        #             SELECT ctid, ROW_NUMBER() OVER (
+        #                 PARTITION BY cnpj_basico ORDER BY 
+        #                 CASE WHEN razao_social IS NOT NULL AND TRIM(razao_social) <> '' THEN 0 ELSE 1 END, 
+        #                 ctid
+        #             ) as rn FROM empresa
+        #         ) t WHERE t.rn > 1
+        #     );
+        # """
+        # cur.execute(query_delete_duplicatas)
+
+        # 2. UPDATES em Estabelecimento - IMPORTANTE: Filtre apenas o necessário
+        # logger.info("Limpando códigos de país na tabela estabelecimento...")
+        # cur.execute("UPDATE estabelecimento SET pais = NULL WHERE pais = '0';")
+        
+        # cur.execute("""
+        #     UPDATE estabelecimento 
+        #     SET pais = LPAD(pais, 3, '0') 
+        #     WHERE pais IS NOT NULL AND LENGTH(TRIM(pais)) = 2;
+        # """)
+
+        # # 3. Portes Vazios
+        # logger.info("Corrigindo porte na tabela empresa...")
+        # cur.execute("UPDATE empresa SET porte = '00' WHERE porte = '' OR porte IS NULL;")
+
+        # 4. CNPJs problemáticos conhecidos no Simples
+        if processar_simples:
+            logger.info("Limpando registros problemáticos da tabela Simples...")
+            # Aqui usamos DELETE normal. Como não tem PK, ele funciona sem erros.
+            cur.execute("""
+                DELETE FROM public.simples 
+                WHERE cnpj_basico IN ('24417449', '24539162', '30721933', '30728066', 
+                                    '30760363', '30847991', '30857441', '30886793', '30972017');
+            """)
+
+        conn.commit()
+        logger.info("CORREÇÕES APLICADAS COM SUCESSO.")
+
+    except Exception as e:
+        conn.rollback() # Reverte se der erro para não corromper
+        logger.error(f"ERRO AO APLICAR CORREÇÕES: {e}")
+        logger.info("ETL Finalizado.")
+        raise
+    
+    finally:
+        cur.close()
+        conn.close()
+        engine.dispose() # Libera recursos da engine
+        gc.collect()
 
 
 # Cria os indices nas tabelas, exceto da info_dados
-def criar_indices():
+def criar_indices(update=False):
+    if not update:
+        logger.info("Primeira vez criando índices. Isso pode levar várias horas dependendo do hardware.")
+        try:
+            # Importante: autocommit=True é obrigatório para CONCURRENTLY
+            conn, _ = connect_db(autocommit=True)
+            cur = conn.cursor()
+
+            logger.info("Aumentando memória de manutenção para criação de índices...")
+            cur.execute("SET maintenance_work_mem = '2GB';") # Acelera muito no seu Xeon
+
+            logger.info("Iniciando criação dos índices...")
+
+            # 1. Criar a Chave Primária (Isso cria o índice principal do CNPJ)
+            # Usamos o comando ALTER TABLE. Isso pode demorar algumas horas no HDD, mas é o correto.
+            logger.info("Criando Chave Primária para empresa...")
+            cur.execute("""
+                ALTER TABLE public.empresa
+                ADD PRIMARY KEY (cnpj_basico);
+            """)
+
+            logger.info("Criando Chave Primária Composta para Estabelecimento...")
+            cur.execute("""
+                ALTER TABLE public.estabelecimento 
+                ADD PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv);
+            """)
+
+            # 2. Índices Adicionais (Opcionais, mas recomendados para performance)
+            # Se você for buscar empresas por Município ou por CNAE:
+            # Lista expandida para garantir performance em buscas reais
+            indices_extras = [
+                ("empresa", "porte_empresa"),
+                ("estabelecimento", "situacao_cadastral"),
+                ("estabelecimento", "cnae_fiscal_principal"),
+                ("estabelecimento", "municipio"),
+                ("estabelecimento", "uf"),
+                ("cnae", "codigo"),
+                ("munic", "codigo")
+            ]
+
+            for tabela, coluna in indices_extras:
+                nome_indice = f"idx_{tabela}_{coluna}"
+                try:
+                    logger.info(f"Criando índice {nome_indice}...")
+                    # CONCURRENTLY evita travar a tabela, IF NOT EXISTS evita erros em restarts
+                    sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
+                    cur.execute(sql)
+                    logger.info(f"Índice {nome_indice} finalizado.")
+                except Exception as e:
+                    logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
+
+            # Opcional: Analisar as tabelas para atualizar as estatísticas do otimizador
+            logger.info("Rodando ANALYZE para otimizar estatísticas...")
+            cur.execute("ANALYZE;")
+
+            cur.close()
+            conn.close()
+            gc.collect()
+            logger.info("Processo de indexação concluído com sucesso!")
+
+        except Exception as e:
+            logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
+            sys.exit(1)
+    else:
+        logger.info("Atualização detectada. Pulando criação de índices.")
+
+
+def move_file_error(zip_path, arquivo):
+    """
+    Move o arquivo ZIP que contém o arquivo com erro para a pasta de erros.
+    
+    Args:
+        zip_path: Caminho completo do arquivo ZIP
+        arquivo: Nome do arquivo dentro do ZIP que teve erro
+    """
     try:
-        conn, _ = connect_db(autocommit=True)  # <- agora com autocommit
-        cur = conn.cursor()
-
-        logger.info("Iniciando criação dos índices...")
-
-        indices = [
-            ("empresa", "cnpj_basico"),
-            ("estabelecimento", "cnpj_basico"),
-            ("socios", "cnpj_basico"),
-            ("simples", "cnpj_basico"),
-        ]
-
-        for tabela, coluna in indices:
-            nome_indice = f"{tabela}_{coluna}_idx"
-            try:
-                sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
-                cur.execute(sql)
-                logger.info(f"Índice {nome_indice} criado com sucesso.")
-            except Exception as e:
-                logger.error(f"Erro ao criar o índice {nome_indice}: {e}", exc_info=True)
-
-        cur.close()
-        conn.close()
-        gc.collect()
-        logger.info("Criação dos índices finalizada.")
-
+        # Garante que o diretório de erros existe
+        ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
+        
+        # Nome do arquivo ZIP
+        zip_filename = os.path.basename(zip_path)
+        
+        # Caminho de destino
+        destino = ERRO_FILES_PATH / zip_filename
+        
+        # Move o arquivo ZIP para a pasta de erros
+        shutil.move(zip_path, destino)
+        
+        logger.warning(f"Arquivo ZIP '{zip_filename}' movido para pasta de erros devido a erro no arquivo '{arquivo}'")
+        
     except Exception as e:
-        logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
-        logger.critical("Não foi possível iniciar o aplicativo")
-        sys.exit(1)
+        logger.error(f"Erro ao mover arquivo ZIP para pasta de erros: {e}")
 
 
-def move_file_error(extracted_file_path, arquivo):
+def parse_brazilian_float(value):
+    """
+    Converte valores brasileiros (vírgula decimal) para float
+    Trata casos especiais: None, NaN, strings vazias, etc.
+
+    # Uso:
+    chunk['capital_social'] = chunk['capital_social'].apply(parse_brazilian_float)
+    """
+    if pd.isna(value):
+        return 0.0
+    
+    if isinstance(value, str):
+        value = value.strip()
+        if value == '' or value.lower() in ['nan', 'none', 'null']:
+            return 0.0
+        
+        # Remove pontos de milhar e substitui vírgula decimal por ponto
+        value = value.replace('.', '').replace(',', '.')
+    
     try:
-        shutil.move(extracted_file_path, ERRO_FILES_PATH / arquivo)
-        logger.info(f"Arquivo {arquivo} movido para a pasta de erro: {ERRO_FILES_PATH}")
-    except Exception as move_err:
-        logger.error(f"Erro ao mover o arquivo {arquivo} para a pasta erro: {move_err}")
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # Função principal do ETL
-def etl_process():
+def etl_process(processar_simples=True):
     try:
         # Criar os diretórios caso não existam
         OUTPUT_FILES_PATH.mkdir(parents=True, exist_ok=True)
-        EXTRACTED_FILES_PATH.mkdir(parents=True, exist_ok=True)
         ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Extraídos: {EXTRACTED_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
+        logger.info(f"Diretórios definidos:\n - Output: {OUTPUT_FILES_PATH}\n - Arquivos com erro: {ERRO_FILES_PATH}")
 
         start_time = datetime.now()
 
@@ -703,70 +915,70 @@ def etl_process():
         logger.info(f"Nova atualização encontrada: {info['ano']}-{info['mes']:02d} em {info['data_atualizacao']}")
         logger.info(f"URL base para download: {info['url']}")
         
-        files = get_files(info['url'])
+        files = get_files(info['url'], processar_simples=processar_simples)
         if not files:
             logger.info("Nenhum arquivo .zip para processar. Encerrando.")
             return
 
-        logger.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
-
         # Baixar arquivos
         zip_files = [download_file(info['url'] + file, OUTPUT_FILES_PATH) for file in files]
 
-        # Extrair arquivos
-        for zip_file in zip_files:
-            extract_files(zip_file, EXTRACTED_FILES_PATH)
+        logger.info("Todos os arquivos foram baixados. Iniciando processamento dos dados.")
 
-        logger.info("Todos os arquivos foram baixados e extraídos. Iniciando processamento dos dados.")
-        
         # Processar os arquivos após download completo
         arquivos_empresa = []
         arquivos_estabelecimento = []
         arquivos_socios = []
         arquivos_simples = []
         arquivos_cnae = []
-        arquivos_moti = []
+        arquivos_estabelecimento_motivo = []
         arquivos_munic = []
-        arquivos_natju = []
+        arquivos_empresa_natureza_juridica = []
         arquivos_pais = []
-        arquivos_quals = []
+        arquivos_socios_qualificacao = []
 
         # Arquivos com erro no processamento
         arquivos_com_erro = []
         
-        for file in os.listdir(EXTRACTED_FILES_PATH):
-            if "EMPRE" in file:
-                arquivos_empresa.append(file)
-            elif "ESTABELE" in file:
-                arquivos_estabelecimento.append(file)
-            elif "SOCIO" in file:
-                arquivos_socios.append(file)
-            elif "SIMPLES" in file:
-                arquivos_simples.append(file)
-            elif "CNAE" in file:
-                arquivos_cnae.append(file)
-            elif "MOTI" in file:
-                arquivos_moti.append(file)
-            elif "MUNIC" in file:
-                arquivos_munic.append(file)
-            elif "NATJU" in file:
-                arquivos_natju.append(file)
-            elif "PAIS" in file:
-                arquivos_pais.append(file)
-            elif "QUALS" in file:
-                arquivos_quals.append(file)
+        # Coleta todos os arquivos de todos os ZIPs
+        for zip_file in zip_files:
+            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                for file in zip_ref.namelist():
+                    # Cria tupla (nome_arquivo, caminho_zip) para manter referência
+                    file_info = (file, zip_file)
+                    
+                    if "EMPRE" in file:
+                        arquivos_empresa.append(file_info)
+                    elif "ESTABELE" in file:
+                        arquivos_estabelecimento.append(file_info)
+                    elif "SOCIO" in file:
+                        arquivos_socios.append(file_info)
+                    elif "SIMPLES" in file:
+                        arquivos_simples.append(file_info)
+                    elif "CNAE" in file:
+                        arquivos_cnae.append(file_info)
+                    elif "MOTI" in file:
+                        arquivos_estabelecimento_motivo.append(file_info)
+                    elif "MUNIC" in file:
+                        arquivos_munic.append(file_info)
+                    elif "NATJU" in file:
+                        arquivos_empresa_natureza_juridica.append(file_info)
+                    elif "PAIS" in file:
+                        arquivos_pais.append(file_info)
+                    elif "QUALS" in file:
+                        arquivos_socios_qualificacao.append(file_info)
 
-        # deixar em ordem alfabética
-        arquivos_empresa.sort()
-        arquivos_estabelecimento.sort()
-        arquivos_socios.sort()
-        arquivos_simples.sort()
-        arquivos_cnae.sort()
-        arquivos_moti.sort()
-        arquivos_munic.sort()
-        arquivos_natju.sort()
-        arquivos_pais.sort()
-        arquivos_quals.sort()
+        # Deixar em ordem alfabética (ordena pela primeira parte da tupla, que é o nome do arquivo)
+        arquivos_empresa.sort(key=lambda x: x[0])
+        arquivos_estabelecimento.sort(key=lambda x: x[0])
+        arquivos_socios.sort(key=lambda x: x[0])
+        arquivos_simples.sort(key=lambda x: x[0])
+        arquivos_cnae.sort(key=lambda x: x[0])
+        arquivos_estabelecimento_motivo.sort(key=lambda x: x[0])
+        arquivos_munic.sort(key=lambda x: x[0])
+        arquivos_empresa_natureza_juridica.sort(key=lambda x: x[0])
+        arquivos_pais.sort(key=lambda x: x[0])
+        arquivos_socios_qualificacao.sort(key=lambda x: x[0])
         
         # Criar tabelas antes de inserir dados
         create_tables()
@@ -776,673 +988,729 @@ def etl_process():
         cur = conn.cursor()
 
         # Começa arquivos_empresa
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "empresa" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela empresa (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "empresa" ;')
         conn.commit()
-        for arquivo in arquivos_empresa:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
-
-            try:
-                empresa_dtypes = {0: object, 1: object, 2: 'Int32', 3: 'Int32', 4: object, 5: 'Int32', 6: object}
-
-                for i, chunk in enumerate(pd.read_csv(extracted_file_path,
-                                                    sep=';',
-                                                    header=None,
-                                                    dtype=empresa_dtypes,
-                                                    encoding='latin-1',
-                                                    chunksize=CHUNK_ROWS,
-                                                    )):
-
-                    chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 'qualificacao_responsavel', 'capital_social', 'porte_empresa', 'ente_federativo_responsavel']
-
-                    def tratar_capital(x):
-                        try:
-                            return float(str(x).replace(',', '.'))
-                        except:
-                            return 0.0
-
-                    chunk['capital_social'] = chunk['capital_social'].apply(tratar_capital)
-                    
+ 
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_empresa:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
                     try:
-                        chunk.to_sql(
-                            name='empresa', 
-                            con=engine, 
-                            if_exists='append', 
-                            index=False, 
-                            chunksize=CHUNK_TO_SQL,
-                            method='multi'
-                            )
-                        logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso!")
+                        empresa_dtypes = {
+                            0: object, 
+                            1: object, 
+                            2: 'Int32', 
+                            3: 'Int32', 
+                            4: object, 
+                            5: 'Int32', 
+                            6: object
+                            }
+                        
+                        # Alterado para leitura em chunks para manter o consumo de RAM estável
+                        for i, chunk in enumerate(pd.read_csv(
+                                filepath_or_buffer=file,
+                                sep=';',
+                                header=None,
+                                dtype=empresa_dtypes,
+                                encoding='latin-1',
+                                chunksize=CHUNK_ROWS)):
+
+                            chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 
+                                            'qualificacao_responsavel', 'capital_social', 
+                                            'porte_empresa', 'ente_federativo_responsavel']
+
+                            # Tratamento de capital social otimizado
+                            chunk['capital_social'] = chunk['capital_social'].apply(parse_brazilian_float)
+
+                            try:
+                                # Gravar dados no banco usando COPY (Alta performance para HDD)
+                                chunk.to_sql(
+                                    name='empresa', 
+                                    con=engine, 
+                                    if_exists='append', 
+                                    index=False, 
+                                    method=psql_insert_copy  # Chama a função que criamos acima
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
+                                
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir via COPY: {e}")
+                                # Se falhar aqui, geralmente é erro de tipo de dado na coluna
+                                break 
+                                
+                            finally:
+                                del chunk
+                                gc.collect()
+
                     except Exception as e:
-                        logger.error(f"Erro ao inserir chunk {i} do arquivo {arquivo}: {e}")
-                        try:
-                            conn.rollback()
-                            logger.warning("Rollback realizado. Tentando inserir novamente o chunk...")
+                        logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo)
 
-                            # Tenta de novo
-                            chunk.to_sql(
-                                name='empresa',
-                                con=engine,
-                                if_exists='append',
-                                index=False,
-                                chunksize=CHUNK_TO_SQL,
-                                method='multi'
-                            )
-                            logger.info(f"Chunk {i} reprocessado com sucesso!")
-                        except Exception as segunda_falha:
-                            logger.error(f"Falha novamente ao reprocessar chunk {i}: {segunda_falha}")
-                            break  # desiste desse arquivo
-
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
-
-            finally:
-                if 'chunk' in locals():
-                    del chunk
-                gc.collect()
+                    finally:
+                        gc.collect()
 
         logger.info("Arquivos de empresa finalizados!")
-        # Fecha cursor
+        
+        # Encerramento seguro
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close() # Importante fechar a conexão bruta também
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "estabelecimento" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela estabelecimento (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "estabelecimento";')
         conn.commit()
-        for arquivo in arquivos_estabelecimento:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
+
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_estabelecimento:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
             
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                estabelecimento_dtypes = {
-                    0: object, 1: object, 2: object, 3: 'Int32', 4: object, 5: 'Int32', 6: 'Int32',
-                    7: 'Int32', 8: object, 9: object, 10: 'Int32', 11: 'Int32', 12: object, 13: object,
-                    14: object, 15: object, 16: object, 17: object, 18: object, 19: object,
-                    20: 'Int32', 21: object, 22: object, 23: object, 24: object, 25: object,
-                    26: object, 27: object, 28: object, 29: 'Int32'
-                }
+                    try:
+                        # Dtypes para evitar que o Pandas tente adivinhar e consuma RAM
+                        estabelecimento_dtypes = {
+                            0: object, 1: object, 2: object, 3: 'Int32', 4: object, 5: 'Int32', 6: object,
+                            7: 'Int32', 8: object, 9: 'Int32', 10: object, 11: object, 12: object, 13: object,
+                            14: object, 15: object, 16: object, 17: object, 18: object, 19: object,
+                            20: 'Int32', 21: object, 22: object, 23: object, 24: object, 25: object,
+                            26: object, 27: object, 28: object, 29: object
+                        }
 
-                for i, chunk in enumerate(pd.read_csv(
-                    extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=estabelecimento_dtypes,
-                    encoding='latin-1',
-                    chunksize=CHUNK_ROWS,
-                )):
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file,
+                            sep=';',
+                            header=None,
+                            dtype=estabelecimento_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS,
+                        )):
 
-                    chunk.columns = [
-                        'cnpj_basico', 'cnpj_ordem', 'cnpj_dv', 'identificador_matriz_filial',
-                        'nome_fantasia', 'situacao_cadastral', 'data_situacao_cadastral',
-                        'motivo_situacao_cadastral', 'nome_cidade_exterior', 'pais',
-                        'data_inicio_atividade', 'cnae_fiscal_principal', 'cnae_fiscal_secundaria',
-                        'tipo_logradouro', 'logradouro', 'numero', 'complemento', 'bairro', 'cep',
-                        'uf', 'municipio', 'ddd_1', 'telefone_1', 'ddd_2', 'telefone_2',
-                        'ddd_fax', 'fax', 'correio_eletronico', 'situacao_especial',
-                        'data_situacao_especial'
-                    ]
+                            chunk.columns = [
+                                'cnpj_basico', 'cnpj_ordem', 'cnpj_dv', 'identificador_matriz_filial',
+                                'nome_fantasia', 'situacao_cadastral', 'data_situacao_cadastral',
+                                'motivo_situacao_cadastral', 'nome_cidade_exterior', 'pais',
+                                'data_inicio_atividade', 'cnae_fiscal_principal', 'cnae_fiscal_secundaria',
+                                'tipo_logradouro', 'logradouro', 'numero', 'complemento', 'bairro', 'cep',
+                                'uf', 'municipio', 'ddd_1', 'telefone_1', 'ddd_2', 'telefone_2',
+                                'ddd_fax', 'fax', 'correio_eletronico', 'situacao_especial',
+                                'data_situacao_especial'
+                            ]
 
-                    chunk.to_sql(
-                        name='estabelecimento',
-                        con=engine,
-                        if_exists='append',
-                        index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
-                    )
+                            # --- TRATAMENTO DE DATAS (Opcional, mas evita erros no Postgres) ---
+                            # Converte YYYYMMDD para YYYY-MM-DD ou None se zero/inválido
+                            colunas_datas = ['data_situacao_cadastral', 'data_inicio_atividade', 'data_situacao_especial']
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                            chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d',errors='coerce'))
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
+                            try:
+                                # Gravar dados no banco usando COPY (Alta performance para HDD)
+                                chunk.to_sql(
+                                    name='estabelecimento',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy 
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
-            finally:
-                if 'chunk' in locals():
-                    del chunk
-                gc.collect()
+                            except Exception as e:
+                                logger.error(f"Erro no insert do chunk {i}: {e}")
+                                break
+
+                            finally:
+                                del chunk
+                                gc.collect()
+
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
+
+                    finally:
+                        gc.collect()
 
         logger.info("Arquivos de estabelecimento finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close() # Importante fechar a conexão bruta também
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão se necessário ou usa a existente
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "socios" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela socios (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "socios";')
         conn.commit()
-        for arquivo in arquivos_socios:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_socios:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                socios_dtypes = {
-                    0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32',
-                    5: 'Int32', 6: 'Int32', 7: object, 8: object,
-                    9: 'Int32', 10: 'Int32'
-                }
+                    try:
+                        # Tipagem otimizada para Sócios
+                        socios_dtypes = {
+                            0: object, 1: 'Int32', 2: object, 3: object, 4: 'Int32',
+                            5: object, 6: 'Int32', 7: object, 8: object,
+                            9: 'Int32', 10: 'Int32'
+                        }
 
-                for i, chunk in enumerate(pd.read_csv(
-                    extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=socios_dtypes,
-                    encoding='latin-1',
-                    chunksize=CHUNK_ROWS,
-                )):
-                    # Renomear colunas
-                    chunk.columns = [
-                        'cnpj_basico',
-                        'identificador_socio',
-                        'nome_socio_razao_social',
-                        'cpf_cnpj_socio',
-                        'qualificacao_socio',
-                        'data_entrada_sociedade',
-                        'pais',
-                        'representante_legal',
-                        'nome_do_representante',
-                        'qualificacao_representante_legal',
-                        'faixa_etaria'
-                    ]
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file,
+                            sep=';',
+                            header=None,
+                            dtype=socios_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS,
+                        )):
+                            # Renomear colunas
+                            chunk.columns = [
+                                'cnpj_basico',
+                                'identificador_socio',
+                                'nome_socio_razao_social',
+                                'cpf_cnpj_socio',
+                                'qualificacao_socio',
+                                'data_entrada_sociedade',
+                                'pais',
+                                'representante_legal',
+                                'nome_do_representante',
+                                'qualificacao_representante_legal',
+                                'faixa_etaria'
+                            ]
 
-                    # Gravar dados no banco:
-                    chunk.to_sql(
-                        name='socios',
-                        con=engine,
-                        if_exists='append',
-                        index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
-                    )
+                            # --- TRATAMENTO DE DATAS (Opcional, mas evita erros no Postgres) ---
+                            # Converte YYYYMMDD para YYYY-MM-DD ou None se zero/inválido
+                            colunas_datas = ['data_entrada_sociedade']
+                            
+                            chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d',errors='coerce'))
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
+                            try:
+                                chunk.to_sql(
+                                    name='socios',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy  # Otimização vital
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir chunk {i} de sócios: {e}")
+                                break
 
-            finally:
-                if 'chunk' in locals():
-                    del chunk
-                gc.collect()
+                            finally:
+                                del chunk
+                                gc.collect()
 
-        logger.info("Arquivos de socios finalizados!")
-        # Fecha cursor
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
+
+                    finally:
+                        gc.collect()
+
+        logger.info("Arquivos de sócios finalizados!")
+        # Encerramento seguro
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close() # Importante fechar a conexão bruta também
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        if processar_simples:
+            # Reabre conexão
+            conn, engine = connect_db()
+            cur = conn.cursor()
+
+            # Limpa a tabela antes do insert
+            logger.info("Limpando dados da tabela simples (mantendo estrutura)...")
+            cur.execute('TRUNCATE TABLE "simples";')
+            conn.commit()
+
+            # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+            for arquivo, zip_path in arquivos_simples:
+                logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+                
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    with zip_ref.open(arquivo) as file:
+
+                        try:
+                            # Dtypes: Lemos datas como object (string) para limpar os '00000000' antes
+                            simples_dtypes = {
+                                0: object,
+                                1: object,
+                                2: object, # data_opcao_simples
+                                3: object, # data_exclusao_simples
+                                4: object,
+                                5: object, # data_opcao_mei
+                                6: object  # data_exclusao_mei
+                            }
+
+                            for i, chunk in enumerate(pd.read_csv(
+                                filepath_or_buffer=file,
+                                sep=';',
+                                header=None,
+                                dtype=simples_dtypes,
+                                encoding='latin-1',
+                                chunksize=CHUNK_ROWS,
+                            )):
+                                # Renomear colunas
+                                chunk.columns = [
+                                    'cnpj_basico',
+                                    'opcao_pelo_simples',
+                                    'data_opcao_simples',
+                                    'data_exclusao_simples',
+                                    'opcao_mei',
+                                    'data_opcao_mei',
+                                    'data_exclusao_mei'
+                                ]
+
+                                # --- TRATAMENTO DE DATAS (Opcional, mas evita erros no Postgres) ---
+                                # Converte YYYYMMDD para YYYY-MM-DD ou None se zero/inválido
+                                colunas_datas = [
+                                    'data_opcao_simples', 'data_exclusao_simples', 
+                                    'data_opcao_mei', 'data_exclusao_mei'
+                                ]
+                                
+                                chunk[colunas_datas] = chunk[colunas_datas].apply(lambda col: pd.to_datetime(col, format='%Y%m%d', errors='coerce'))
+
+                                # Gravar dados no banco usando COPY (Alta performance para HDD)
+                                try:
+                                    chunk.to_sql(
+                                        name='simples',
+                                        con=engine,
+                                        if_exists='append',
+                                        index=False,
+                                        method=psql_insert_copy # Função de alta performance
+                                    )
+                                    logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
+
+                                except Exception as e:
+                                    logger.error(f"Erro ao inserir chunk {i} de simples: {e}")
+                                    break
+
+                                finally:
+                                    del chunk
+                                    gc.collect()
+
+                        except Exception as e:
+                            logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                            arquivos_com_erro.append(arquivo)
+                            move_file_error(zip_path, arquivo) 
+
+                        finally:
+                            gc.collect()
+
+            logger.info("Arquivos do simples finalizados!")
+
+            # Encerramento seguro de recursos
+            try:
+                cur.close()
+                conn.close()
+                engine.dispose()
+            except:
+                pass
+
+            gc.collect()
+
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "simples" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela cnae (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "cnae";')
         conn.commit()
-        for arquivo in arquivos_simples:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_cnae:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                simples_dtypes = {
-                    0: object,
-                    1: object,
-                    2: 'Int32',
-                    3: 'Int32',
-                    4: object,
-                    5: 'Int32',
-                    6: 'Int32'
-                }
+                    try:
+                        cnae_dtypes = {
+                            0: object,
+                            1: object
+                        }
 
-                for i, chunk in enumerate(pd.read_csv(
-                    extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=simples_dtypes,
-                    encoding='latin-1',
-                    chunksize=CHUNK_ROWS,
-                )):
-                    # Renomear colunas
-                    chunk.columns = [
-                        'cnpj_basico',
-                        'opcao_pelo_simples',
-                        'data_opcao_simples',
-                        'data_exclusao_simples',
-                        'opcao_mei',
-                        'data_opcao_mei',
-                        'data_exclusao_mei'
-                    ]
+                        # Adicionado chunksize para manter o consumo de RAM constante e baixo
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file,
+                            sep=';',
+                            header=None,
+                            dtype=cnae_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS # Mantém o padrão de segurança
+                        )):
 
-                    # Gravar dados no banco
-                    chunk.to_sql(
-                        name='simples',
-                        con=engine,
-                        if_exists='append',
-                        index=False,
-                        chunksize=CHUNK_TO_SQL,
-                        method='multi'
-                    )
+                            # Renomear colunas
+                            chunk.columns = ['codigo', 'descricao']
 
-                    logger.info(f"Arquivo {arquivo} / parte {i} inserido com sucesso no banco de dados!")
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
+                            try:
+                                chunk.to_sql(
+                                    name='cnae',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir chunk {i} de CNAE: {e}")
+                                break
 
-            finally:
-                if 'chunk' in locals():
-                    del chunk
-                gc.collect()
+                            finally:
+                                del chunk
+                                gc.collect()
 
-        logger.info("Arquivos do simples finalizados!")
-        # Fecha cursor
-        try:
-            cur.close()
-        except:
-            pass
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
 
-        # Fecha engine e libera RAM
-        try:
-            engine.dispose()
-        except:
-            pass
-
-        gc.collect()
-
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
-        cur = conn.cursor()
-
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "cnae" ;')
-        conn.commit()
-        for arquivo in arquivos_cnae:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
-
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
-
-            try:
-                cnae = pd.read_csv(
-                    filepath_or_buffer=extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype='object',
-                    encoding='latin-1'
-                )
-
-                # Renomear colunas
-                cnae.columns = ['codigo', 'descricao']
-
-                # Gravar dados no banco
-                cnae.to_sql(
-                    name='cnae',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
-
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
-
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
-
-            finally:
-                if 'cnae' in locals():
-                    del cnae
-                gc.collect()
+                    finally:
+                        gc.collect()
 
         logger.info("Arquivos de cnae finalizados!")
-        # Fecha cursor
+
+        # Encerramento seguro
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "moti" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela estabelecimento_motivo (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "estabelecimento_motivo" ;')
         conn.commit()
-        for arquivo in arquivos_moti:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_estabelecimento_motivo:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                moti_dtypes = {
-                    0: 'Int32',
-                    1: object
-                }
+                    try:
+                        estabelecimento_motivo_dtypes = {
+                            0: 'Int32',
+                            1: object
+                        }
 
-                moti = pd.read_csv(
-                    filepath_or_buffer=extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=moti_dtypes,
-                    encoding='latin-1'
-                )
+                        # Alterado para ler em chunks para garantir baixo uso de RAM
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file,
+                            sep=';',
+                            header=None,
+                            dtype=estabelecimento_motivo_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS
+                        )):
 
-                # Renomear colunas
-                moti.columns = ['codigo', 'descricao']
+                            # Renomear colunas
+                            chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                moti.to_sql(
-                    name='moti',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
+                            try:
+                                chunk.to_sql(
+                                    name='estabelecimento_motivo',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir chunk {i} de estabelecimento_motivo: {e}")
+                                break
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
+                            finally:
+                                del chunk
+                                gc.collect()
 
-            finally:
-                if 'moti' in locals():
-                    del moti
-                gc.collect()
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
 
-        logger.info("Arquivos de moti finalizados!")
-        # Fecha cursor
+                    finally:
+                        gc.collect()
+
+        logger.info("Arquivos de estabelecimento_motivo finalizados!")
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Arquivos de munic:
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "munic" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela munic (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "munic";')
         conn.commit()
-        for arquivo in arquivos_munic:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_munic:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                munic_dtypes = {
-                    0: 'Int32',
-                    1: object
-                }
+                    try:
+                        munic_dtypes = {
+                            0: 'Int32',
+                            1: object
+                        }
 
-                munic = pd.read_csv(
-                    filepath_or_buffer=extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=munic_dtypes,
-                    encoding='latin-1'
-                )
+                        # Processamento em chunks para evitar picos de RAM
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file, 
+                            sep=';',
+                            header=None,
+                            dtype=munic_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS
+                        )):
 
-                # Renomear colunas
-                munic.columns = ['codigo', 'descricao']
+                            # Renomear colunas
+                            chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                munic.to_sql(
-                    name='munic',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
+                            try:
+                                chunk.to_sql(
+                                    name='munic',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir chunk {i} de municípios: {e}")
+                                break
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
+                            finally:
+                                # Limpeza agressiva por chunk
+                                del chunk
+                                gc.collect()
 
-            finally:
-                if 'munic' in locals():
-                    del munic
-                gc.collect()
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo de municípios {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
 
-        logger.info("Arquivos de munic finalizados!")
-        # Fecha cursor
+                    finally:
+                        gc.collect()
+
+        logger.info("Arquivos de municípios finalizados!")
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Arquivos de natju:
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "natju" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela empresa_natureza_juridica (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "empresa_natureza_juridica";')
         conn.commit()
-        for arquivo in arquivos_natju:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_empresa_natureza_juridica:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                natju_dtypes = {
-                    0: 'Int32',
-                    1: object
-                }
+                    try:
+                        empresa_natureza_juridica_dtypes = {
+                            0: 'Int32',
+                            1: object
+                        }
 
-                natju = pd.read_csv(
-                    filepath_or_buffer=extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=natju_dtypes,
-                    encoding='latin-1'
-                )
+                        # Alterado para leitura em chunks para manter o consumo de RAM estável
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file, 
+                            sep=';',
+                            header=None,
+                            dtype=empresa_natureza_juridica_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS
+                        )):
 
-                # Renomear colunas
-                natju.columns = ['codigo', 'descricao']
+                            # Renomear colunas
+                            chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                natju.to_sql(
-                    name='natju',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
+                            try:
+                                chunk.to_sql(
+                                    name='empresa_natureza_juridica',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir chunk {i} de empresa_natureza_juridica: {e}")
+                                break
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
+                            finally:
+                                # Limpeza de memória imediata
+                                del chunk
+                                gc.collect()
 
-            finally:
-                if 'natju' in locals():
-                    del natju
-                gc.collect()
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo de empresa_natureza_juridica {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
 
-        logger.info("Arquivos de natju finalizados!")
-        # Fecha cursor
+                    finally:
+                        gc.collect()
+
+        logger.info("Arquivos de empresa_natureza_juridica finalizados!")
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
 
-        # Reabre conexão para próximo bloco
+        # Reabre conexão
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # Arquivos de pais:
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "pais" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela pais (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "pais";')
         conn.commit()
-        for arquivo in arquivos_pais:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_pais:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                pais_dtypes = {
-                    0: 'Int32',
-                    1: object
-                }
+                    try:
+                        pais_dtypes = {
+                            0: 'Int32',
+                            1: object
+                        }
 
-                pais = pd.read_csv(
-                    filepath_or_buffer=extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=pais_dtypes,
-                    encoding='latin-1'
-                )
+                        # Leitura em chunks para estabilidade total da RAM
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file, 
+                            sep=';',
+                            header=None,
+                            dtype=pais_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS
+                        )):
 
-                # Renomear colunas
-                pais.columns = ['codigo', 'descricao']
+                            # Renomear colunas
+                            chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                pais.to_sql(
-                    name='pais',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
+                            try:
+                                chunk.to_sql(
+                                    name='pais',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir chunk {i} de países: {e}")
+                                break
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
+                            finally:
+                                # Limpeza de memória
+                                del chunk
+                                gc.collect()
 
-            finally:
-                if 'pais' in locals():
-                    del pais
-                gc.collect()
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo de países {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
 
-        logger.info("Arquivos de pais finalizados!")
-        # Fecha cursor
+                    finally:
+                        gc.collect()
+
+        logger.info("Arquivos de países finalizados!")
+
+        # Encerramento seguro de conexões
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
@@ -1454,70 +1722,92 @@ def etl_process():
         cur = conn.cursor()
 
         # Arquivos de qualificação de sócios:
-        # Drop table antes do insert
-        cur.execute('DROP TABLE IF EXISTS "quals" ;')
+        # Limpa a tabela antes do insert
+        logger.info("Limpando dados da tabela socios_qualificacao (mantendo estrutura)...")
+        cur.execute('TRUNCATE TABLE "socios_qualificacao" ;')
         conn.commit()
-        for arquivo in arquivos_quals:
-            logger.info(f"Trabalhando no arquivo: {arquivo}")
 
-            extracted_file_path = os.path.join(EXTRACTED_FILES_PATH, arquivo)
-            if not os.path.exists(extracted_file_path):
-                logger.warning(f"Arquivo não encontrado: {extracted_file_path}")
-                continue
+        # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
+        for arquivo, zip_path in arquivos_socios_qualificacao:
+            logger.info(f"Trabalhando no arquivo: {arquivo} do ZIP: {os.path.basename(zip_path)}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                with zip_ref.open(arquivo) as file:
 
-            try:
-                quals_dtypes = {
-                    0: 'Int32',
-                    1: object
-                }
+                    try:
+                        socios_qualificacao_dtypes = {
+                            0: 'Int32',
+                            1: object
+                        }
 
-                quals = pd.read_csv(
-                    filepath_or_buffer=extracted_file_path,
-                    sep=';',
-                    header=None,
-                    dtype=quals_dtypes,
-                    encoding='latin-1'
-                )
+                        # Alterado para leitura em chunks para manter o consumo de RAM estável
+                        for i, chunk in enumerate(pd.read_csv(
+                            filepath_or_buffer=file,
+                            sep=';',
+                            header=None,
+                            dtype=socios_qualificacao_dtypes,
+                            encoding='latin-1',
+                            chunksize=CHUNK_ROWS
+                        )):
 
-                # Renomear colunas
-                quals.columns = ['codigo', 'descricao']
+                            # Renomear colunas
+                            chunk.columns = ['codigo', 'descricao']
 
-                # Gravar dados no banco
-                quals.to_sql(
-                    name='quals',
-                    con=engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=CHUNK_TO_SQL,
-                    method='multi'
-                )
+                            # Gravar dados no banco usando COPY (Alta performance para HDD)
+                            try:
+                                chunk.to_sql(
+                                    name='socios_qualificacao',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
+                                    method=psql_insert_copy  # Otimização vital
+                                )
+                                logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
-                logger.info(f"Arquivo {arquivo} inserido com sucesso no banco de dados!")
+                            except Exception as e:
+                                logger.error(f"Erro ao inserir chunk {i} de socios_qualificacao: {e}")
+                                break
 
-            except Exception as e:
-                logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
-                arquivos_com_erro.append(arquivo)
-                move_file_error(extracted_file_path, arquivo)
+                            finally:
+                                # Limpeza de memória imediata
+                                del chunk
+                                gc.collect()
 
-            finally:
-                if 'quals' in locals():
-                    del quals
-                gc.collect()
-        
-        logger.info("Arquivos de quals finalizados!")
-        # Fecha cursor
+                    except Exception as e:
+                        logger.error(f"Erro ao processar o arquivo {arquivo}: {e}")
+                        arquivos_com_erro.append(arquivo)
+                        move_file_error(zip_path, arquivo) 
+
+                    finally:
+                        gc.collect()
+
+        logger.info("Arquivos de socios_qualificacao finalizados!")
+
+        # Encerramento seguro de recursos
         try:
             cur.close()
-        except:
-            pass
-
-        # Fecha engine e libera RAM
-        try:
+            conn.close()
             engine.dispose()
         except:
             pass
 
         gc.collect()
+
+        # Inserir os dados da ultima atualização na tabela info_dados
+        inserir_info_dados(info)
+
+        # Processo de inserção finalizado
+        logger.info('Processo de carga dos arquivos finalizado!')
+
+        # Aplica correções nas tabelas
+        apply_fixes(processar_simples=processar_simples)
+
+        # Criação dos índices
+        criar_indices(info['update'])
+
+        # Remover arquivos após a inserção no banco
+        shutil.rmtree(OUTPUT_FILES_PATH)
+        logger.info("Arquivos removidos após a carga no banco.")
 
         # Grava os dados e gera um txt com os arquivos com erro
         if arquivos_com_erro:
@@ -1527,46 +1817,77 @@ def etl_process():
             with open("arquivos_com_erro.txt", "w", encoding="utf-8") as f:
                 for nome in arquivos_com_erro:
                     f.write(nome + "\n")
-        
-        # Inserir os dados da ultima atualização na tabela info_dados
-        inserir_info_dados(info)
-
-        # Processo de inserção finalizado
-        logger.info('Processo de carga dos arquivos finalizado!')
-
-        # Criação dos índices
-        criar_indices()
-
-        # Remover arquivos após a inserção no banco
-        shutil.rmtree(OUTPUT_FILES_PATH)
-        shutil.rmtree(EXTRACTED_FILES_PATH)
-        logger.info("Arquivos removidos após a carga no banco.")
+        else:
+            # sem arquivos com erro, exclui o diretório
+            if os.path.exists(ERRO_FILES_PATH):
+                shutil.rmtree(ERRO_FILES_PATH)
 
         logger.info(f"ETL concluído com sucesso em {converter_segundos(start_time, datetime.now())}")
 
     except Exception as e:
         logger.error(f"Erro no processo ETL: {e}", exc_info=True)
         logger.critical("Não foi possível iniciar o aplicativo")
+        # Encerramento seguro de recursos
+        try:
+            cur.close()
+            conn.close()
+            engine.dispose()
+            gc.collect()
+        except:
+            pass
         sys.exit(1)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ETL Receita Federal do Brasil")
+    
+    # Flag para rodar o ETL (será True por padrão se nada for passado)
     parser.add_argument(
-        "--etl",
-        action="store_true",
-        help="Executa o processo completo de ETL"
+        "--etl", 
+        action="store_true", 
+        help="Executa o processo de extração e carga."
     )
+    
+    # Flag para pular o simples
     parser.add_argument(
-        "--inserir_indice",
-        action="store_true",
-        help="Cria índices nas tabelas do banco"
+        "--no-simples", 
+        action="store_false", 
+        dest="processar_simples", 
+        help="Não processa os dados do Simples Nacional."
+    )
+    
+    parser.add_argument(
+        "--inserir_indice", 
+        action="store_true", 
+        help="Cria índices nas tabelas."
     )
 
+    parser.add_argument(
+        "--fixes", 
+        action="store_true", 
+        help="Aplica correções na base."
+    )
+
+    # Define o padrão do Simples como True
+    parser.set_defaults(processar_simples=True)
     args = parser.parse_args()
 
-    if args.etl:
-        etl_process()
+    # LÓGICA DE EXECUÇÃO PADRÃO:
+    # Se o usuário não passou NENHUM argumento (nem --etl, nem --fixes, nem --inserir_indice)
+    # nós forçamos a execução do ETL completo.
+    if not (args.etl or args.inserir_indice or args.fixes):
+        logger.info("Nenhum argumento detectado. Iniciando ETL completo por padrão...")
+        args.etl = True
 
+    # 1. Executa ETL (se solicitado ou se for o padrão)
+    if args.etl:
+        logger.info(f"Iniciando ETL (Processar Simples: {args.processar_simples})")
+        etl_process(processar_simples=args.processar_simples)
+
+    # 2. Executa Correções (se solicitado explicitamente)
+    if args.fixes:
+        apply_fixes(processar_simples=args.processar_simples)
+
+    # 3. Executa Índices (se solicitado explicitamente)
     if args.inserir_indice:
         criar_indices()
