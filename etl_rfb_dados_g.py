@@ -277,6 +277,13 @@ def verificar_nova_atualizacao():
         conn, engine = connect_db()
         cur = conn.cursor()
 
+        # PRIMEIRO: Verifica se a tabela tem alguma linha
+        cur.execute("SELECT COUNT(*) FROM info_dados;")
+        total_linhas = cur.fetchone()[0]
+        
+        # Define update = True se já existem linhas, False se tabela está vazia
+        update = total_linhas > 0
+
         cur.execute("""
             SELECT 1 FROM info_dados
             WHERE ano = %s AND mes = %s AND data_atualizacao = %s
@@ -296,7 +303,8 @@ def verificar_nova_atualizacao():
         'ano': ano,
         'mes': mes,
         'data_atualizacao': data_atualizacao,
-        'url': f"https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/{ano}-{mes:02d}/"
+        'url': f"https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/{ano}-{mes:02d}/",
+        'update': update
     }
 
 
@@ -769,67 +777,71 @@ def apply_fixes(processar_simples=True):
 
 
 # Cria os indices nas tabelas, exceto da info_dados
-def criar_indices():
-    try:
-        # Importante: autocommit=True é obrigatório para CONCURRENTLY
-        conn, _ = connect_db(autocommit=True)
-        cur = conn.cursor()
+def criar_indices(update=False):
+    if not update:
+        logger.info("Primeira vez criando índices. Isso pode levar várias horas dependendo do hardware.")
+        try:
+            # Importante: autocommit=True é obrigatório para CONCURRENTLY
+            conn, _ = connect_db(autocommit=True)
+            cur = conn.cursor()
 
-        logger.info("Aumentando memória de manutenção para criação de índices...")
-        cur.execute("SET maintenance_work_mem = '2GB';") # Acelera muito no seu Xeon
+            logger.info("Aumentando memória de manutenção para criação de índices...")
+            cur.execute("SET maintenance_work_mem = '2GB';") # Acelera muito no seu Xeon
 
-        logger.info("Iniciando criação dos índices...")
+            logger.info("Iniciando criação dos índices...")
 
-        # 1. Criar a Chave Primária (Isso cria o índice principal do CNPJ)
-        # Usamos o comando ALTER TABLE. Isso pode demorar algumas horas no HDD, mas é o correto.
-        logger.info("Criando Chave Primária para empresa...")
-        cur.execute("""
-            ALTER TABLE public.empresa
-            ADD PRIMARY KEY (cnpj_basico);
-        """)
+            # 1. Criar a Chave Primária (Isso cria o índice principal do CNPJ)
+            # Usamos o comando ALTER TABLE. Isso pode demorar algumas horas no HDD, mas é o correto.
+            logger.info("Criando Chave Primária para empresa...")
+            cur.execute("""
+                ALTER TABLE public.empresa
+                ADD PRIMARY KEY (cnpj_basico);
+            """)
 
-        logger.info("Criando Chave Primária Composta para Estabelecimento...")
-        cur.execute("""
-            ALTER TABLE public.estabelecimento 
-            ADD PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv);
-        """)
+            logger.info("Criando Chave Primária Composta para Estabelecimento...")
+            cur.execute("""
+                ALTER TABLE public.estabelecimento 
+                ADD PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv);
+            """)
 
-        # 2. Índices Adicionais (Opcionais, mas recomendados para performance)
-        # Se você for buscar empresas por Município ou por CNAE:
-        # Lista expandida para garantir performance em buscas reais
-        indices_extras = [
-            ("empresa", "porte_empresa"),
-            ("estabelecimento", "situacao_cadastral"),
-            ("estabelecimento", "cnae_fiscal_principal"),
-            ("estabelecimento", "municipio"),
-            ("estabelecimento", "uf"),
-            ("cnae", "codigo"),
-            ("munic", "codigo")
-        ]
+            # 2. Índices Adicionais (Opcionais, mas recomendados para performance)
+            # Se você for buscar empresas por Município ou por CNAE:
+            # Lista expandida para garantir performance em buscas reais
+            indices_extras = [
+                ("empresa", "porte_empresa"),
+                ("estabelecimento", "situacao_cadastral"),
+                ("estabelecimento", "cnae_fiscal_principal"),
+                ("estabelecimento", "municipio"),
+                ("estabelecimento", "uf"),
+                ("cnae", "codigo"),
+                ("munic", "codigo")
+            ]
 
-        for tabela, coluna in indices_extras:
-            nome_indice = f"idx_{tabela}_{coluna}"
-            try:
-                logger.info(f"Criando índice {nome_indice}...")
-                # CONCURRENTLY evita travar a tabela, IF NOT EXISTS evita erros em restarts
-                sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
-                cur.execute(sql)
-                logger.info(f"Índice {nome_indice} finalizado.")
-            except Exception as e:
-                logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
+            for tabela, coluna in indices_extras:
+                nome_indice = f"idx_{tabela}_{coluna}"
+                try:
+                    logger.info(f"Criando índice {nome_indice}...")
+                    # CONCURRENTLY evita travar a tabela, IF NOT EXISTS evita erros em restarts
+                    sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
+                    cur.execute(sql)
+                    logger.info(f"Índice {nome_indice} finalizado.")
+                except Exception as e:
+                    logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
 
-        # Opcional: Analisar as tabelas para atualizar as estatísticas do otimizador
-        logger.info("Rodando ANALYZE para otimizar estatísticas...")
-        cur.execute("ANALYZE;")
+            # Opcional: Analisar as tabelas para atualizar as estatísticas do otimizador
+            logger.info("Rodando ANALYZE para otimizar estatísticas...")
+            cur.execute("ANALYZE;")
 
-        cur.close()
-        conn.close()
-        gc.collect()
-        logger.info("Processo de indexação concluído com sucesso!")
+            cur.close()
+            conn.close()
+            gc.collect()
+            logger.info("Processo de indexação concluído com sucesso!")
 
-    except Exception as e:
-        logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
-        sys.exit(1)
+        except Exception as e:
+            logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
+            sys.exit(1)
+    else:
+        logger.info("Atualização detectada. Pulando criação de índices.")
 
 
 def move_file_error(zip_path, arquivo):
@@ -1800,7 +1812,7 @@ def etl_process(processar_simples=True):
         apply_fixes(processar_simples=processar_simples)
 
         # Criação dos índices
-        criar_indices()
+        criar_indices(info['update'])
 
         # Remover arquivos após a inserção no banco
         # shutil.rmtree(OUTPUT_FILES_PATH)
