@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import io
 import csv
+import psutil
 
 '''
 Sistema de importação dos dados abertos da Receita Federal do Brasil (RFB)
@@ -54,13 +55,27 @@ BASE_DIR = pathlib.Path().resolve()  # Diretório do script
 OUTPUT_FILES_PATH = BASE_DIR / "files_downloaded"
 ERRO_FILES_PATH = BASE_DIR / "files_error"
 
-# Tamanho padrão de chunk para leitura dos arquivos grandes
-CHUNK_ROWS  = 1_000_000  # 1 milhão de linhas por chunk (leitura)
-CHUNK_TO_SQL= 10_000     # 10 mil linhas por insert no to_sql (insert)
+def calcular_chunks_automatico():
+    """Calcula chunks ideais baseado na RAM disponível"""
+     
+    mem = psutil.virtual_memory()
+    ram_gb = mem.total / (1024**3)
+    available_gb = mem.available / (1024**3)
+    
+    logger.info(f"RAM total: {ram_gb:.1f}GB, Disponível: {available_gb:.1f}GB")
+    
+    if available_gb > 8:
+        return 3_000_000, 150_000
+    elif available_gb > 4:
+        return 2_000_000, 100_000
+    else:
+        return 1_000_000, 50_000
+
+CHUNK_ROWS, CHUNK_TO_SQL = calcular_chunks_automatico()
 
 logger.info("================================================================================")
 logger.info("Iniciando ETL - dados_rfb G")
-
+logger.info(f"Usando CHUNK_ROWS={CHUNK_ROWS:,}, CHUNK_TO_SQL={CHUNK_TO_SQL:,}")
 # carrega o arquivo de configuração .env
 # Caminho relativo, subindo um nível para acessar dados_rfb/.env
 ENV_PATH_PARENT = BASE_DIR.parent / "dados_rfb_env" / ".env"

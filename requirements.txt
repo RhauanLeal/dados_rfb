@@ -1,6 +1,27 @@
-pandas>=2.0.0
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.0
-requests>=2.25.0
-beautifulsoup4>=4.9.0
-python-dotenv>=1.0.0
+# === CORE ===
+pandas==2.2.1  # Versão estável com melhor performance
+numpy==1.26.4  # Compatível com pandas 2.2.1
+
+# === DATABASE ===
+psycopg2-binary==2.9.9  # Binary para evitar compilação
+SQLAlchemy==2.0.29  # ORM/engine
+python-dotenv==1.0.1  # Variáveis de ambiente
+
+# === WEB/ETL ===
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.2.1  # Parser mais rápido que html.parser
+
+# === UTILITIES ===
+python-dateutil==2.9.0.post0
+pytz==2024.1
+tzdata==2024.1  # Timezone data
+charset-normalizer==3.3.2  # Para encoding de arquivos
+
+# === MONITORING ===
+psutil==5.9.8  # Monitoramento de recursos
+
+# === OPTIMIZATIONS ===
+numexpr==2.9.0  # Aceleração numérica para pandas
+bottleneck==1.3.8  # Funções numpy otimizadas
+
