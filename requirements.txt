@@ -1,9 +1,9 @@
-pandas==2.2.1          # DataFrame e CSV
-numpy==1.26.4          # Dependência do pandas
-psycopg2-binary==2.9.9 # PostgreSQL (binary mais rápido)
-SQLAlchemy==2.0.29     # Engine do PostgreSQL
-python-dotenv==1.0.1   # Variáveis de ambiente
-requests==2.31.0       # Download HTTP
-beautifulsoup4==4.12.3 # Parse HTML
-lxml==5.2.1            # Parser rápido para BeautifulSoup
-psutil==5.9.8          # Monitoramento de memória/CPU
+pandas>=2.2.3          # DataFrame e CSV (2.2.3+ tem wheels para Python 3.13)
+numpy>=2.0.0           # Dependência do pandas (2.0+ tem wheels para Python 3.13)
+psycopg2-binary>=2.9.9 # PostgreSQL (binary mais rápido)
+SQLAlchemy>=2.0.29     # Engine do PostgreSQL
+python-dotenv>=1.0.1   # Variáveis de ambiente
+requests>=2.31.0       # Download HTTP
+beautifulsoup4>=4.12.3 # Parse HTML
+psutil>=5.9.8          # Monitoramento de memória/CPU
+tqdm>=4.66.0           # Barra de progresso para downloads

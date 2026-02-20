@@ -1,32 +1,42 @@
-#etl_rfb_dados.py
+# etl_rfb.py
 import argparse
 import os
 import sys
 import logging
 import shutil
+import threading
+import base64
+import re
 import requests
 import zipfile
 import pathlib
 import gc
 import pandas as pd
 import psycopg2
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 from sqlalchemy import create_engine
-from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv, find_dotenv  # Lembre-se de criar o aquivo .env com as configurações DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs, unquote, quote
 import io
 import csv
 import psutil
 
 '''
-Sistema de importação dos dados abertos da Receita Federal do Brasil (RFB)
-* arquivos baixados via HTTP são armazenados localmente,
-* arquivos são extraídos de .zip para diretórios locais, possuem codificação UNIX(LF) e ANSI (latin-1),
-* arquivos extraídos via ETL são carregados via Pandas e inseridos em tabelas permanentes,
-* tabela info_dados mantém controle de versões (ano, mês, data_atualizacao),
-* logs são armazenados em arquivo e exibidos no console.
-* tratamento de erros e movimentação de arquivos com problemas para diretório específico.
-* finalizando a importação os arquivos baixados e extraídos são excluídos para economizar espaço em disco.
+Sistema de ETL dos dados abertos da Receita Federal do Brasil (RFB)
+* verifica novas versoes no portal da RFB via Nextcloud/WebDAV;
+* baixa arquivos .zip para o diretorio local de downloads;
+* le os arquivos internos dos .zip diretamente com Pandas (em chunks), sem extracao previa;
+* carrega os dados no PostgreSQL (to_sql com COPY), com tabelas permanentes;
+* em cada carga, limpa (TRUNCATE) e recarrega as tabelas de dados;
+* mantem controle de versao na tabela info_dados (ano, mes, data_atualizacao);
+* registra logs em arquivo e console, e gera dump de navegacao da RFB;
+* move para files_error os .zip com erro de processamento;
+* aplica correcoes e criacao de indices ao final da carga;
+* os arquivos baixados nao sao removidos automaticamente (remocao esta comentada no codigo).
 '''
 
 # Garantir diretório de logs
@@ -63,7 +73,7 @@ ENV_PATH_PARENT = BASE_DIR.parent / "dados_rfb_env" / ".env"
 ENV_PATH_LOCAL = BASE_DIR / ".env"
 
 logger.info("================================================================================")
-logger.info("Iniciando ETL - dados_rfb G")
+logger.info("Iniciando ETL - dados_rfb ")
 
 # Lógica automática:
 if os.path.exists(ENV_PATH_PARENT):
@@ -96,6 +106,12 @@ def calcular_chunks_automatico():
 
 CHUNK_ROWS, CHUNK_TO_SQL = calcular_chunks_automatico()
 logger.info(f"Usando CHUNK_ROWS={CHUNK_ROWS:,}, CHUNK_TO_SQL={CHUNK_TO_SQL:,}")
+
+# Downloads simultâneos (altere conforme a largura de banda Disponível)
+DOWNLOAD_WORKERS = 3
+
+# Ativado via --progress na linha de comando
+_show_progress = False
 
 
 def psql_insert_copy(table, conn, keys, data_iter):
@@ -233,79 +249,326 @@ def connect_db(autocommit=False):
 
 
 # Gerar base URL dinâmica (Ano e Mês atual)
-def verificar_nova_atualizacao():
-    # URL base
-    base_url = "https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/"
-    response = requests.get(base_url)
+URL_RAIZ = "https://arquivos.receitafederal.gov.br/"
+SHARE_TOKEN = ""
+WEBDAV_BASE = "https://arquivos.receitafederal.gov.br/public.php/webdav"
+CNPJ_PATH = "/Dados/Cadastros/CNPJ"
+SALVAR_DUMP_TXT = False  # Ative para salvar o dump de navegação e a lista final de zips em logs/rfb_dump.txt
+dump_file = LOG_DIR / "rfb_dump.txt"
+_dump_pages: list[dict] = []
 
-    if response.status_code != 200:
-        logger.error(f"Erro ao acessar {base_url}: código {response.status_code}")
-        return None
 
-    # Parse do HTML
-    soup = BeautifulSoup(response.text, 'html.parser')
-    datas = []
-
-    # Coleta os pares (ano-mes, data de atualização)
-    for tr in soup.find_all('tr'):
-        tds = tr.find_all('td')
-        if len(tds) >= 3:
-            a_tag = tds[1].find('a')
-            data_txt = tds[2].text.strip()
-            if a_tag and data_txt:
-                href = a_tag.get('href')
-                if href and href.endswith('/') and len(href.rstrip('/')) == 7:
-                    ano_mes = href.rstrip('/')  # ex: "2025-03"
-                    try:
-                        data_atualizacao = datetime.strptime(data_txt, "%Y-%m-%d %H:%M")
-                        datas.append((ano_mes, data_atualizacao))
-                    except:
-                        continue
-
-    if not datas:
-        logger.info("Nenhuma pasta válida encontrada no site da RFB.")
-        return None
-    
-    # Identifica a mais recente
-    mais_recente = max(datas, key=lambda x: x[1])
-    ano_mes, data_atualizacao = mais_recente
-    ano, mes = map(int, ano_mes.split('-'))
-
-    # cria a tabela info_dados
-    if criar_tabela_info_dados():
-        # Conecta ao banco para verificar se já existe
+def obter_registro_mais_recente_db():
+    """
+    Consulta a tabela info_dados e retorna o registro mais recente.
+    Retorna None se a tabela nao existir ou estiver vazia.
+    """
+    conn = None
+    engine = None
+    cur = None
+    try:
         conn, engine = connect_db()
         cur = conn.cursor()
 
-        # PRIMEIRO: Verifica se a tabela tem alguma linha
-        cur.execute("SELECT COUNT(*) FROM info_dados;")
-        total_linhas = cur.fetchone()[0]
-        
-        # Define update = True se já existem linhas, False se tabela está vazia
-        update = total_linhas > 0
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'info_dados'
+            );
+            """
+        )
+        existe_tabela = cur.fetchone()[0]
 
-        cur.execute("""
-            SELECT 1 FROM info_dados
-            WHERE ano = %s AND mes = %s AND data_atualizacao = %s
-            LIMIT 1;
-        """, (ano, mes, data_atualizacao))
-
-        existe = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if existe:
-            logger.info("A versão mais recente já está registrada no banco de dados.")
+        if not existe_tabela:
+            logger.warning("Tabela info_dados ainda nao existe. Sem historico de versoes.")
             return None
 
-    # Se não existir, retorna os dados para serem usados posteriormente
-    return {
-        'ano': ano,
-        'mes': mes,
-        'data_atualizacao': data_atualizacao,
-        'url': f"https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/{ano}-{mes:02d}/",
-        'update': update
+        cur.execute(
+            """
+            SELECT ano, mes, data_atualizacao
+            FROM info_dados
+            ORDER BY ano DESC, mes DESC
+            LIMIT 1;
+            """
+        )
+        row = cur.fetchone()
+        if row:
+            logger.info(f"Versao atual no banco: {row[0]}-{row[1]:02d} (data_atualizacao: {row[2]})")
+            return {"ano": row[0], "mes": row[1], "data_atualizacao": row[2]}
+
+        logger.info("Tabela info_dados existe mas esta vazia.")
+        return None
+    except Exception as e:
+        logger.warning(f"Nao foi possivel consultar info_dados: {e}. Continuando sem comparacao.")
+        return None
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+        if engine is not None:
+            engine.dispose()
+
+
+def obter_share_token() -> str | None:
+    """
+    Descobre o token do share publico na pagina raiz da RFB.
+    """
+    logger.info(f"Buscando share token em: {URL_RAIZ}")
+    try:
+        resp = requests.get(URL_RAIZ, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Erro ao acessar {URL_RAIZ}: {e}")
+        return None
+
+    _dump_pages.append({"url": URL_RAIZ, "html": resp.text, "links": []})
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    og = soup.find("meta", property="og:url")
+    if og:
+        match = re.search(r"/index\.php/s/([A-Za-z0-9]+)", og.get("content", ""))
+        if match:
+            token = match.group(1)
+            logger.info(f"Share token obtido via og:url: {token}")
+            return token
+
+    inp = soup.find("input", {"id": "initial-state-files_sharing-sharingToken"})
+    if inp:
+        try:
+            decoded = base64.b64decode(inp.get("value", "")).decode("utf-8")
+            token = decoded.strip('"')
+            if token:
+                logger.info(f"Share token obtido via initial-state: {token}")
+                return token
+        except Exception as e:
+            logger.warning(f"Erro ao decodificar sharingToken: {e}")
+
+    logger.error("Share token nao encontrado na pagina raiz.")
+    return None
+
+
+def propfind_listar(path: str) -> list[dict]:
+    """
+    Lista conteudo de um diretorio WebDAV.
+    """
+    url = f"{WEBDAV_BASE}{path}"
+    credentials = base64.b64encode(f"{SHARE_TOKEN}:".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "Depth": "1",
+        "Content-Type": "application/xml",
     }
+    body = (
+        '<?xml version="1.0"?>'
+        '<d:propfind xmlns:d="DAV:">'
+        "<d:prop><d:displayname/><d:resourcetype/></d:prop>"
+        "</d:propfind>"
+    )
+    try:
+        resp = requests.request("PROPFIND", url, headers=headers, data=body, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Erro PROPFIND {url}: {e}")
+        return []
+
+    _dump_pages.append({"url": url, "html": resp.text, "links": []})
+
+    ns = {"d": "DAV:"}
+    try:
+        root = ET.fromstring(resp.text)
+    except ET.ParseError as e:
+        logger.error(f"Erro ao parsear XML de {url}: {e}")
+        return []
+
+    itens = []
+    for response in root.findall("d:response", ns):
+        href_elem = response.find("d:href", ns)
+        if href_elem is None:
+            continue
+
+        href = href_elem.text or ""
+        prop = response.find(".//d:prop", ns)
+        resourcetype = prop.find("d:resourcetype", ns) if prop is not None else None
+        is_collection = resourcetype is not None and resourcetype.find("d:collection", ns) is not None
+        tipo = "dir" if is_collection else "file"
+        nome = unquote(href.rstrip("/").split("/")[-1])
+        if not nome:
+            continue
+        itens.append({"nome": nome, "tipo": tipo})
+
+    return itens
+
+
+def navegar_ate_cnpj():
+    """
+    Descobre token e valida acesso ao caminho CNPJ.
+    """
+    global SHARE_TOKEN
+    token = obter_share_token()
+    if token:
+        SHARE_TOKEN = token
+    else:
+        logger.warning(f"Usando token fallback: {SHARE_TOKEN}")
+
+    logger.info(f"Verificando pasta CNPJ via WebDAV: {WEBDAV_BASE}{CNPJ_PATH}")
+    itens = propfind_listar(CNPJ_PATH)
+    if not itens:
+        logger.error(f"Pasta CNPJ inacessivel ou vazia: {CNPJ_PATH}")
+        return None
+    logger.info(f"Pasta CNPJ acessivel. {len(itens)} item(s) encontrado(s).")
+    return CNPJ_PATH
+
+
+def obter_links_ano_mes(cnpj_path):
+    """
+    Lista pastas AAAA-MM no caminho CNPJ.
+    """
+    logger.info(f"Buscando pastas AAAA-MM em: {WEBDAV_BASE}{cnpj_path}")
+    itens = propfind_listar(cnpj_path)
+    resultado = []
+
+    for item in itens:
+        if item["tipo"] != "dir":
+            continue
+        nome = item["nome"]
+        if len(nome) != 7 or nome[4] != "-":
+            continue
+        try:
+            ano = int(nome[:4])
+            mes = int(nome[5:])
+            if not (1 <= mes <= 12):
+                continue
+            resultado.append({"ano_mes": nome, "ano": ano, "mes": mes, "path": f"{cnpj_path}/{nome}"})
+        except ValueError:
+            continue
+
+    resultado.sort(key=lambda x: (x["ano"], x["mes"]))
+    return resultado
+
+
+def selecionar_pasta_mais_recente(lista_ano_mes, info_db):
+    """
+    Retorna a pasta mais recente do site se for mais nova que a do banco.
+    """
+    if not lista_ano_mes:
+        logger.warning("Lista de pastas AAAA-MM vazia.")
+        return None
+
+    mais_recente_site = lista_ano_mes[-1]
+    if info_db is None:
+        logger.info(f"Sem historico no banco. Pasta mais recente do site: {mais_recente_site['ano_mes']}")
+        return mais_recente_site
+
+    tupla_site = (mais_recente_site["ano"], mais_recente_site["mes"])
+    tupla_db = (info_db["ano"], info_db["mes"])
+
+    if tupla_site > tupla_db:
+        logger.info(
+            f"Nova versao disponivel no site: {mais_recente_site['ano_mes']} "
+            f"(banco possui: {info_db['ano']}-{info_db['mes']:02d})"
+        )
+        return mais_recente_site
+
+    logger.info(
+        f"Sem novidade: site={mais_recente_site['ano_mes']} "
+        f"banco={info_db['ano']}-{info_db['mes']:02d}. Nenhum download necessario."
+    )
+    return None
+
+
+def salvar_dump_txt(lista_zips: list[str]) -> None:
+    """
+    Grava em logs/rfb_dump.txt o conteudo carregado do site e a lista final de zips.
+    """
+    sep = "=" * 80
+    with dump_file.open("w", encoding="utf-8") as f:
+        f.write(f"{sep}\n")
+        f.write(f"DUMP RFB - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Total de paginas carregadas: {len(_dump_pages)}\n")
+        f.write(f"{sep}\n\n")
+
+        for i, page in enumerate(_dump_pages, 1):
+            f.write(f"{'-' * 80}\n")
+            f.write(f"PAGINA {i}: {page['url']}\n")
+            f.write(f"{'-' * 80}\n\n")
+            f.write(f"[HTML BRUTO]\n{page['html']}\n\n")
+
+        f.write(f"{sep}\n")
+        f.write(f"LISTA FINAL DE .ZIP ({len(lista_zips)} arquivo(s))\n")
+        f.write(f"{sep}\n")
+        for url in lista_zips:
+            f.write(f"{url}\n")
+
+    logger.info(f"Dump salvo em: {dump_file}")
+
+
+def obter_lista_zips(path_pasta):
+    """
+    Lista arquivos .zip em uma pasta AAAA-MM.
+    """
+    logger.info(f"Buscando arquivos .zip em: {WEBDAV_BASE}{path_pasta}")
+    itens = propfind_listar(path_pasta)
+    zips = []
+
+    for item in itens:
+        if item["tipo"] == "file" and item["nome"].lower().endswith(".zip"):
+            url_download = f"{WEBDAV_BASE}{path_pasta}/{quote(item['nome'])}"
+            zips.append(url_download)
+
+    return sorted(zips)
+
+
+def verificar_nova_atualizacao():
+    """
+    Identifica a versao mais recente disponivel no site da RFB.
+    Retorna dict com {ano, mes, data_atualizacao, lista_zips, update} ou None sem novidade.
+    """
+    criar_tabela_info_dados()
+    lista_zips: list[str] = []
+
+    try:
+        info_db = obter_registro_mais_recente_db()
+
+        conn_chk, engine_chk = connect_db()
+        cur_chk = conn_chk.cursor()
+        cur_chk.execute("SELECT COUNT(*) FROM info_dados;")
+        update = cur_chk.fetchone()[0] > 0
+        cur_chk.close()
+        conn_chk.close()
+        engine_chk.dispose()
+
+        cnpj_path = navegar_ate_cnpj()
+        if not cnpj_path:
+            logger.error("Nao foi possivel acessar a pasta CNPJ no site da RFB.")
+            return None
+
+        lista_ano_mes = obter_links_ano_mes(cnpj_path)
+        if not lista_ano_mes:
+            logger.info("Nenhuma pasta AAAA-MM encontrada no site da RFB.")
+            return None
+
+        pasta = selecionar_pasta_mais_recente(lista_ano_mes, info_db)
+        if not pasta:
+            return None
+
+        lista_zips = obter_lista_zips(pasta["path"])
+        if not lista_zips:
+            logger.warning(f"Nenhum arquivo .zip encontrado em: {pasta['path']}")
+            return None
+
+        return {
+            "ano": pasta["ano"],
+            "mes": pasta["mes"],
+            "data_atualizacao": datetime.now(),
+            "lista_zips": lista_zips,
+            "update": update,
+        }
+    finally:
+        if SALVAR_DUMP_TXT and _dump_pages:
+            salvar_dump_txt(lista_zips)
 
 
 # Cria tabela info_dados e indexes
@@ -616,31 +879,43 @@ def inserir_info_dados(info):
     conn.close() # Fecha a conexão com o banco
 
 
-# traz a lista de arquivos da url
-def get_files(base_url, processar_simples=True):
-    response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
-    
-    if response.status_code == 200:
-        soup = BeautifulSoup(response.text, 'html.parser')
+# ---------------------------------------------------------------------------
+# Sessão HTTP com headers de navegador para downloads do Nextcloud
+# ---------------------------------------------------------------------------
+_download_session: requests.Session | None = None
+_session_lock = threading.Lock()
 
-        # Identificar arquivos ZIP disponíveis para download
-        files = [a["href"] for a in soup.find_all("a", href=True) if a["href"].endswith(".zip")]
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 
-        logger.info(f"Arquivos encontrados ({len(files)}): {sorted(files)}")
-
-        # Se processar_simples for False, remove arquivos que contenham 'Simples' no nome
-        if not processar_simples:
-            logger.info("Ignorando arquivo do Simples")
-            files = [f for f in files if "Simples" not in f and "SIMPLES" not in f]
-
-        if not files:
-            logger.info("Nenhum arquivo .zip encontrado para o mês atual.")
-            return []
-
-        return sorted(files)
-    else:
-        logger.error(f'Erro ao acessar {base_url}: código {response.status_code}')
-        return []
+def _get_download_session() -> requests.Session:
+    """
+    Retorna (ou cria) uma Session configurada para download via WebDAV do share público.
+    Usa Basic auth (token, '') — mesmo mecanismo usado pelo PROPFIND no scraper.
+    Thread-safe via double-checked locking.
+    """
+    global _download_session
+    if _download_session is None:
+        with _session_lock:
+            if _download_session is None:
+                session = requests.Session()
+                session.headers.update(_BROWSER_HEADERS)
+                token = SHARE_TOKEN
+                if token:
+                    credentials = base64.b64encode(f"{token}:".encode()).decode()
+                    session.headers['Authorization'] = f"Basic {credentials}"
+                    logger.info(f"Sessão WebDAV inicializada com token: {token}")
+                else:
+                    logger.warning("SHARE_TOKEN não Disponível para autenticação WebDAV.")
+                _download_session = session
+    return _download_session
 
 
 # Função para verificar se o arquivo já foi baixado e se é necessário atualizar
@@ -649,7 +924,8 @@ def check_diff(url, file_name):
         return True
 
     try:
-        response = requests.head(url, timeout=10)
+        session = _get_download_session()
+        response = session.head(url, timeout=10, allow_redirects=True)
         new_size = int(response.headers.get("content-length", 0))
     except Exception as e:
         logger.warning(f"Erro ao verificar cabeçalho de {url}: {e}")
@@ -664,21 +940,71 @@ def check_diff(url, file_name):
 
 
 # Função para baixar arquivos com barra de progresso
-def download_file(url, output_path):
-    response = requests.get(url, stream=True)
-    file_name = os.path.join(output_path, url.split("/")[-1])
+def download_file(url, output_path, tqdm_position=0):
+    # Extrai o nome do arquivo da URL:
+    #   WebDAV: .../public.php/webdav/Dados/.../Cnaes.zip → "Cnaes.zip"
+    #   (fallback legado): .../download?path=...&files=Cnaes.zip → "Cnaes.zip"
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    if 'files' in qs:
+        basename = qs['files'][0]
+    else:
+        basename = unquote(parsed.path.split('/')[-1])
+
+    file_name = os.path.join(output_path, basename)
 
     if not check_diff(url, file_name):
-            logger.info(f"Arquivo {file_name} já está atualizado.")
-            return file_name
-    
-    logger.info(f"Baixando {file_name}...")
-    
-    with open(file_name, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+        logger.info(f"Arquivo {basename} já está atualizado.")
+        return file_name
 
-    logger.info(f"Download concluído para {file_name}")
+    logger.info(f"Baixando {basename}...")
+
+    session = _get_download_session()
+    response = session.get(url, stream=True, timeout=300)
+
+    if response.status_code != 200:
+        logger.error(f"Erro HTTP {response.status_code} ao baixar {basename}")
+        return None
+
+    content_type = response.headers.get('Content-Type', '')
+    if 'text/html' in content_type:
+        logger.error(
+            f"Nextcloud retornou HTML para {basename} (Content-Type: {content_type}). "
+            "Token expirado ou sessão inválida."
+        )
+        return None
+
+    total_bytes = int(response.headers.get('content-length', 0))
+    bytes_written = 0
+
+    if _show_progress:
+        pbar = tqdm(
+            total=total_bytes if total_bytes > 0 else None,
+            unit='B', unit_scale=True, unit_divisor=1024,
+            desc=f"{basename[:35]:<35}", ncols=90, leave=True,
+            position=tqdm_position,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+        )
+
+    with open(file_name, "wb") as f:
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
+                f.write(chunk)
+                bytes_written += len(chunk)
+                if _show_progress:
+                    pbar.update(len(chunk))
+
+    if _show_progress:
+        pbar.close()
+
+    size_mb = bytes_written / (1024 * 1024)
+    logger.info(f"Download concluído para {basename} ({size_mb:.1f} MB)")
+
+    if bytes_written == 0:
+        logger.error(f"Arquivo {basename} baixado com 0 bytes! Removendo arquivo inválido.")
+        os.remove(file_name)
+        return None
+
     return file_name
 
 
@@ -913,15 +1239,35 @@ def etl_process(processar_simples=True):
             return
         
         logger.info(f"Nova atualização encontrada: {info['ano']}-{info['mes']:02d} em {info['data_atualizacao']}")
-        logger.info(f"URL base para download: {info['url']}")
-        
-        files = get_files(info['url'], processar_simples=processar_simples)
-        if not files:
+
+        lista_zips = info['lista_zips']
+
+        # Filtra arquivos do Simples se necessário
+        if not processar_simples:
+            lista_zips = [url for url in lista_zips if 'Simples' not in url and 'SIMPLES' not in url]
+            logger.info("Ignorando arquivo do Simples")
+
+        if not lista_zips:
             logger.info("Nenhum arquivo .zip para processar. Encerrando.")
             return
 
-        # Baixar arquivos
-        zip_files = [download_file(info['url'] + file, OUTPUT_FILES_PATH) for file in files]
+        logger.info(f"Arquivos .zip para download ({len(lista_zips)}): {sorted(lista_zips)}")
+
+        # Baixar arquivos (DOWNLOAD_WORKERS downloads simultâneos)
+        logger.info(f"Iniciando downloads com {DOWNLOAD_WORKERS} worker(s) simultâneo(s)...")
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as executor:
+            futures = [
+                executor.submit(download_file, url, OUTPUT_FILES_PATH, i % DOWNLOAD_WORKERS)
+                for i, url in enumerate(lista_zips)
+            ]
+            zip_files = [f.result() for f in futures]
+
+        # Filtra downloads que falharam
+        zip_files = [f for f in zip_files if f is not None]
+
+        if not zip_files:
+            logger.error("Nenhum arquivo foi baixado com sucesso. Encerrando.")
+            return
 
         logger.info("Todos os arquivos foram baixados. Iniciando processamento dos dados.")
 
@@ -1859,14 +2205,23 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--fixes", 
-        action="store_true", 
+        "--fixes",
+        action="store_true",
         help="Aplica correções na base."
+    )
+
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Exibe barra de progresso no terminal durante os downloads"
     )
 
     # Define o padrão do Simples como True
     parser.set_defaults(processar_simples=True)
     args = parser.parse_args()
+
+    if args.progress:
+        _show_progress = True
 
     # LÓGICA DE EXECUÇÃO PADRÃO:
     # Se o usuário não passou NENHUM argumento (nem --etl, nem --fixes, nem --inserir_indice)

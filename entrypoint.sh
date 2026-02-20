@@ -2,5 +2,5 @@
 set -e
 
 echo "Iniciando ETL RFB..."
-python etl_rfb_dados_g.py
+python etl_rfb.py
 echo "ETL finalizado."
