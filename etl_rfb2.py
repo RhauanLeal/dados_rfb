@@ -1102,72 +1102,114 @@ def apply_fixes(processar_simples=True):
         gc.collect()
 
 
+def _constraint_exists(cur, table_name: str, constraint_name: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname = %s
+           AND conrelid = %s::regclass
+         LIMIT 1;
+        """,
+        [constraint_name, f"public.{table_name}"],
+    )
+    return cur.fetchone() is not None
+
+
 # Cria os indices nas tabelas, exceto da info_dados
 def criar_indices(update=False):
-    if not update:
-        logger.info("Primeira vez criando índices. Isso pode levar várias horas dependendo do hardware.")
-        try:
-            # Importante: autocommit=True é obrigatório para CONCURRENTLY
-            conn, _ = connect_db(autocommit=True)
-            cur = conn.cursor()
-
-            logger.info("Aumentando memória de manutenção para criação de índices...")
-            cur.execute("SET maintenance_work_mem = '2GB';") # Acelera muito no seu Xeon
-
-            logger.info("Iniciando criação dos índices...")
-
-            # 1. Criar a Chave Primária (Isso cria o índice principal do CNPJ)
-            # Usamos o comando ALTER TABLE. Isso pode demorar algumas horas no HDD, mas é o correto.
-            logger.info("Criando Chave Primária para empresa...")
-            cur.execute("""
-                ALTER TABLE public.empresa
-                ADD PRIMARY KEY (cnpj_basico);
-            """)
-
-            logger.info("Criando Chave Primária Composta para Estabelecimento...")
-            cur.execute("""
-                ALTER TABLE public.estabelecimento 
-                ADD PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv);
-            """)
-
-            # 2. Índices Adicionais (Opcionais, mas recomendados para performance)
-            # Se você for buscar empresas por Município ou por CNAE:
-            # Lista expandida para garantir performance em buscas reais
-            indices_extras = [
-                ("empresa", "porte_empresa"),
-                ("estabelecimento", "situacao_cadastral"),
-                ("estabelecimento", "cnae_fiscal_principal"),
-                ("estabelecimento", "municipio"),
-                ("estabelecimento", "uf"),
-                ("cnae", "codigo"),
-                ("munic", "codigo")
-            ]
-
-            for tabela, coluna in indices_extras:
-                nome_indice = f"idx_{tabela}_{coluna}"
-                try:
-                    logger.info(f"Criando índice {nome_indice}...")
-                    # CONCURRENTLY evita travar a tabela, IF NOT EXISTS evita erros em restarts
-                    sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} ON {tabela} ({coluna});'
-                    cur.execute(sql)
-                    logger.info(f"Índice {nome_indice} finalizado.")
-                except Exception as e:
-                    logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
-
-            # Opcional: Analisar as tabelas para atualizar as estatísticas do otimizador
-            logger.info("Rodando ANALYZE para otimizar estatísticas...")
-            cur.execute("ANALYZE;")
-
-            cur.close()
-            conn.close()
-            gc.collect()
-            logger.info("Processo de indexação concluído com sucesso!")
-
-        except Exception as e:
-            logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
-            sys.exit(1)
-    else:
+    if update:
         logger.info("Atualização detectada. Pulando criação de índices.")
+        return
+
+    logger.info("Primeira vez criando índices. Isso pode levar várias horas dependendo do hardware.")
+    conn = None
+    cur = None
+    try:
+        # Importante: autocommit=True é obrigatório para CONCURRENTLY
+        conn, _ = connect_db(autocommit=True)
+        cur = conn.cursor()
+
+        logger.info("Aumentando memória de manutenção para criação de índices...")
+        cur.execute("SET maintenance_work_mem = '2GB';")  # Acelera muito no seu Xeon
+
+        logger.info("Iniciando criação dos índices...")
+
+        # 1. Tenta criar PKs quando possível, mas sem abortar o processo.
+        try:
+            if not _constraint_exists(cur, "empresa", "empresa_pkey"):
+                logger.info("Criando Chave Primária para empresa...")
+                cur.execute("""
+                    ALTER TABLE public.empresa
+                    ADD CONSTRAINT empresa_pkey PRIMARY KEY (cnpj_basico);
+                """)
+            else:
+                logger.info("PK empresa já existe. Pulando.")
+        except Exception as e:
+            logger.warning(
+                f"Não foi possível criar PK de empresa (seguindo com índices): {e}"
+            )
+            conn.rollback()
+
+        try:
+            if not _constraint_exists(cur, "estabelecimento", "estabelecimento_pkey"):
+                logger.info("Criando Chave Primária Composta para Estabelecimento...")
+                cur.execute("""
+                    ALTER TABLE public.estabelecimento
+                    ADD CONSTRAINT estabelecimento_pkey
+                    PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv);
+                """)
+            else:
+                logger.info("PK estabelecimento já existe. Pulando.")
+        except Exception as e:
+            logger.warning(
+                f"Não foi possível criar PK de estabelecimento (seguindo com índices): {e}"
+            )
+            conn.rollback()
+
+        # 2. Índices adicionais (inclui os críticos para consulta por CNPJ).
+        indices_extras = [
+            ("empresa", "cnpj_basico"),   # crítico para buscar_empresa_por_cnpj
+            ("socios", "cnpj_basico"),    # crítico para buscar_socios_por_cnpj
+            ("empresa", "porte_empresa"),
+            ("estabelecimento", "situacao_cadastral"),
+            ("estabelecimento", "cnae_fiscal_principal"),
+            ("estabelecimento", "municipio"),
+            ("estabelecimento", "uf"),
+            ("cnae", "codigo"),
+            ("munic", "codigo"),
+        ]
+
+        for tabela, coluna in indices_extras:
+            nome_indice = f"idx_{tabela}_{coluna}"
+            try:
+                logger.info(f"Criando índice {nome_indice}...")
+                # CONCURRENTLY evita travar tabela; IF NOT EXISTS evita erro em reexecução.
+                sql = (
+                    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} "
+                    f"ON {tabela} ({coluna});"
+                )
+                cur.execute(sql)
+                logger.info(f"Índice {nome_indice} finalizado.")
+            except Exception as e:
+                logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
+                conn.rollback()
+
+        # Atualiza estatísticas do planner após indexação
+        logger.info("Rodando ANALYZE para otimizar estatísticas...")
+        cur.execute("ANALYZE;")
+
+        logger.info("Processo de indexação concluído com sucesso!")
+
+    except Exception as e:
+        logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+        gc.collect()
 
 
 def move_file_error(zip_path, arquivo):
