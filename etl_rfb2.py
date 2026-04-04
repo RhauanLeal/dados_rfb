@@ -2203,7 +2203,7 @@ def etl_process(processar_simples=True):
         criar_indices(info['update'])
 
         # Remover arquivos após a inserção no banco
-        # shutil.rmtree(OUTPUT_FILES_PATH)
+        shutil.rmtree(OUTPUT_FILES_PATH)
         logger.info("Arquivos removidos após a carga no banco.")
 
         logger.info(f"ETL concluído com sucesso em {converter_segundos(start_time, datetime.now())}")
