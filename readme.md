@@ -172,6 +172,9 @@ docker compose build --no-cache
 - recomendado, pois inicia, executa, Remove container ao final (sem utilizar recursos desnecessários)
 docker compose run --rm etl
 
+# Forçar atualização completa
+docker compose run --rm etl --force
+
 - menos ideal mas funciona
 docker compose up -d
 

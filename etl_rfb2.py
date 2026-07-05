@@ -521,10 +521,13 @@ def obter_lista_zips(path_pasta):
     return sorted(zips)
 
 
-def verificar_nova_atualizacao():
+def verificar_nova_atualizacao(force_update=False):
     """
     Identifica a versao mais recente disponivel no site da RFB.
     Retorna dict com {ano, mes, data_atualizacao, lista_zips, update} ou None sem novidade.
+
+    Args:
+        force_update: Se True, ignora verificação de versão e força atualização
     """
     criar_tabela_info_dados()
     lista_zips: list[str] = []
@@ -551,8 +554,13 @@ def verificar_nova_atualizacao():
             return None
 
         pasta = selecionar_pasta_mais_recente(lista_ano_mes, info_db)
-        if not pasta:
+        if not pasta and not force_update:
             return None
+
+        # Se force_update, usa a versão mais recente mesmo que seja igual
+        if not pasta and force_update:
+            pasta = lista_ano_mes[-1]
+            logger.warning("⚠️  FORÇA DE ATUALIZAÇÃO ATIVADA: Reprocessando dados mesmo que versão seja igual")
 
         lista_zips = obter_lista_zips(pasta["path"])
         if not lista_zips:
@@ -1288,7 +1296,7 @@ def remove_duplicates_by_key(df: pd.DataFrame, key_column: str) -> pd.DataFrame:
 
 
 # Função principal do ETL
-def etl_process(processar_simples=True):
+def etl_process(processar_simples=True, force_update=False):
     try:
         # Criar os diretórios caso não existam
         OUTPUT_FILES_PATH.mkdir(parents=True, exist_ok=True)
@@ -1298,7 +1306,7 @@ def etl_process(processar_simples=True):
 
         start_time = datetime.now()
 
-        info = verificar_nova_atualizacao()
+        info = verificar_nova_atualizacao(force_update=force_update)
         if not info:
             logger.info("Nenhuma atualização nova encontrada. Encerrando.")
             return
@@ -2293,6 +2301,12 @@ if __name__ == "__main__":
         help="Exibe barra de progresso no terminal durante os downloads"
     )
 
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Força a atualização mesmo que a versão no banco seja igual à do site"
+    )
+
     # Define o padrão do Simples como True
     parser.set_defaults(processar_simples=True)
     args = parser.parse_args()
@@ -2309,8 +2323,8 @@ if __name__ == "__main__":
 
     # 1. Executa ETL (se solicitado ou se for o padrão)
     if args.etl:
-        logger.info(f"Iniciando ETL (Processar Simples: {args.processar_simples})")
-        etl_process(processar_simples=args.processar_simples)
+        logger.info(f"Iniciando ETL (Processar Simples: {args.processar_simples}, Force: {args.force})")
+        etl_process(processar_simples=args.processar_simples, force_update=args.force)
 
     # 2. Executa Correções (se solicitado explicitamente)
     if args.fixes:
