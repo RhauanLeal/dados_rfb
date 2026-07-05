@@ -168,6 +168,9 @@ deactivate
 # 1. Construa a imagem (via cmd entre na pasta do seu projeto)
 docker compose build --no-cache
 
+# 2. caso precise limpar orfãs, remova a imagem
+docker compose down --remove-orphans
+
 # 4. Suba o container (no caso do ETL ele ja inicia automaticamente)
 - recomendado, pois inicia, executa, Remove container ao final (sem utilizar recursos desnecessários)
 docker compose run --rm etl
