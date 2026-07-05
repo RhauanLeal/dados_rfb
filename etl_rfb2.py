@@ -1293,7 +1293,8 @@ def etl_process(processar_simples=True):
             logger.info("Nenhum arquivo .zip para processar. Encerrando.")
             return
 
-        logger.info(f"Arquivos .zip para download ({len(lista_zips)}): {sorted(lista_zips)}")
+        urls = ",\n".join(sorted(lista_zips))
+        logger.info(f"Arquivos .zip para download ({len(lista_zips)}): \n{urls}")
 
         # Baixar arquivos (DOWNLOAD_WORKERS downloads simultâneos)
         logger.info(f"Iniciando downloads com {DOWNLOAD_WORKERS} worker(s) simultâneo(s)...")
