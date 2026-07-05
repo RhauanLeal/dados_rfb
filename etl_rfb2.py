@@ -1118,11 +1118,7 @@ def _constraint_exists(cur, table_name: str, constraint_name: str) -> bool:
 
 # Cria os indices nas tabelas, exceto da info_dados
 def criar_indices(update=False):
-    if update:
-        logger.info("Atualização detectada. Pulando criação de índices.")
-        return
-
-    logger.info("Primeira vez criando índices. Isso pode levar várias horas dependendo do hardware.")
+    logger.info("Iniciando processo de indexação e otimização de estatísticas...")
     conn = None
     cur = None
     try:
@@ -1130,12 +1126,26 @@ def criar_indices(update=False):
         conn, _ = connect_db(autocommit=True)
         cur = conn.cursor()
 
-        logger.info("Aumentando memória de manutenção para criação de índices...")
-        cur.execute("SET maintenance_work_mem = '2GB';")  # Acelera muito no seu Xeon
+        logger.info("Aumentando memória de manutenção para otimização...")
+        cur.execute("SET maintenance_work_mem = '2GB';")
 
-        logger.info("Iniciando criação dos índices...")
+        if not update:
+            logger.info("Primeira carga: criando índices. Isso pode levar várias horas...")
+        else:
+            logger.info("Atualização detectada: recriando índices e atualizando estatísticas...")
 
-        # 1. Tenta criar PKs quando possível, mas sem abortar o processo.
+        # 1. Cria/recria PKs
+        if update:
+            logger.info("Removendo PKs antigas para recriação em atualização...")
+            try:
+                cur.execute('ALTER TABLE "empresa" DROP CONSTRAINT IF EXISTS "empresa_pkey" CASCADE;')
+            except Exception:
+                pass
+            try:
+                cur.execute('ALTER TABLE "estabelecimento" DROP CONSTRAINT IF EXISTS "estabelecimento_pkey" CASCADE;')
+            except Exception:
+                pass
+
         try:
             if not _constraint_exists(cur, "empresa", "empresa_pkey"):
                 logger.info("Criando Chave Primária para empresa...")
@@ -1144,10 +1154,10 @@ def criar_indices(update=False):
                     ADD CONSTRAINT empresa_pkey PRIMARY KEY (cnpj_basico);
                 """)
             else:
-                logger.info("PK empresa já existe. Pulando.")
+                logger.info("PK empresa já existe.")
         except Exception as e:
             logger.warning(
-                f"Não foi possível criar PK de empresa (seguindo com índices): {e}"
+                f"Não foi possível criar PK de empresa (continuando): {e}"
             )
             conn.rollback()
 
@@ -1160,10 +1170,10 @@ def criar_indices(update=False):
                     PRIMARY KEY (cnpj_basico, cnpj_ordem, cnpj_dv);
                 """)
             else:
-                logger.info("PK estabelecimento já existe. Pulando.")
+                logger.info("PK estabelecimento já existe.")
         except Exception as e:
             logger.warning(
-                f"Não foi possível criar PK de estabelecimento (seguindo com índices): {e}"
+                f"Não foi possível criar PK de estabelecimento (continuando): {e}"
             )
             conn.rollback()
 
@@ -1172,6 +1182,7 @@ def criar_indices(update=False):
             ("empresa", "cnpj_basico"),   # crítico para buscar_empresa_por_cnpj
             ("socios", "cnpj_basico"),    # crítico para buscar_socios_por_cnpj
             ("empresa", "porte_empresa"),
+            ("empresa", "natureza_juridica"),
             ("estabelecimento", "situacao_cadastral"),
             ("estabelecimento", "cnae_fiscal_principal"),
             ("estabelecimento", "municipio"),
@@ -1249,19 +1260,31 @@ def parse_brazilian_float(value):
     """
     if pd.isna(value):
         return 0.0
-    
+
     if isinstance(value, str):
         value = value.strip()
         if value == '' or value.lower() in ['nan', 'none', 'null']:
             return 0.0
-        
+
         # Remove pontos de milhar e substitui vírgula decimal por ponto
         value = value.replace('.', '').replace(',', '.')
-    
+
     try:
         return float(value)
     except (ValueError, TypeError):
         return 0.0
+
+
+def remove_duplicates_by_key(df: pd.DataFrame, key_column: str) -> pd.DataFrame:
+    """
+    Remove duplicatas mantendo o primeiro registro de cada chave.
+    Útil para dados da RFB que podem ter CNPJs/chaves duplicadas.
+    """
+    duplicates = df[df.duplicated(subset=[key_column], keep=False)]
+    if len(duplicates) > 0:
+        logger.warning(f"Encontradas {len(duplicates) // 2} linhas duplicadas em '{key_column}'. Removendo...")
+
+    return df.drop_duplicates(subset=[key_column], keep='first')
 
 
 # Função principal do ETL
@@ -1377,6 +1400,14 @@ def etl_process(processar_simples=True):
         cur = conn.cursor()
 
         # Começa arquivos_empresa
+        # Remove PK antes de limpar (em caso de duplicatas nos dados)
+        logger.info("Removendo PRIMARY KEY de empresa...")
+        try:
+            cur.execute('ALTER TABLE "empresa" DROP CONSTRAINT IF EXISTS "empresa_pkey" CASCADE;')
+            conn.commit()
+        except Exception:
+            pass
+
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela empresa (mantendo estrutura)...")
         cur.execute('TRUNCATE TABLE "empresa" ;')
@@ -1408,20 +1439,23 @@ def etl_process(processar_simples=True):
                                 encoding='latin-1',
                                 chunksize=CHUNK_ROWS)):
 
-                            chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica', 
-                                            'qualificacao_responsavel', 'capital_social', 
+                            chunk.columns = ['cnpj_basico', 'razao_social', 'natureza_juridica',
+                                            'qualificacao_responsavel', 'capital_social',
                                             'porte_empresa', 'ente_federativo_responsavel']
 
                             # Tratamento de capital social otimizado
                             chunk['capital_social'] = chunk['capital_social'].apply(parse_brazilian_float)
 
+                            # Remove duplicatas por CNPJ (proteção contra dados duplicados da RFB)
+                            chunk = remove_duplicates_by_key(chunk, 'cnpj_basico')
+
                             try:
                                 # Gravar dados no banco usando COPY (Alta performance para HDD)
                                 chunk.to_sql(
-                                    name='empresa', 
-                                    con=engine, 
-                                    if_exists='append', 
-                                    index=False, 
+                                    name='empresa',
+                                    con=engine,
+                                    if_exists='append',
+                                    index=False,
                                     method=psql_insert_copy  # Chama a função que criamos acima
                                 )
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
