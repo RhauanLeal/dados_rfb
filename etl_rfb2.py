@@ -1290,7 +1290,17 @@ def remove_duplicates_by_key(df: pd.DataFrame, key_column: str) -> pd.DataFrame:
     """
     duplicates = df[df.duplicated(subset=[key_column], keep=False)]
     if len(duplicates) > 0:
-        logger.warning(f"Encontradas {len(duplicates) // 2} linhas duplicadas em '{key_column}'. Removendo...")
+        num_duplicates = len(duplicates) // 2
+        logger.warning(f"Encontradas {num_duplicates} linhas duplicadas em '{key_column}'. Removendo...")
+
+        # Mostra os valores duplicados (até 10 primeiros)
+        duplicate_values = duplicates[key_column].unique()
+        if len(duplicate_values) > 0:
+            sample_size = min(10, len(duplicate_values))
+            sample_values = duplicate_values[:sample_size].tolist()
+            logger.warning(f"Exemplos de valores duplicados: {sample_values}")
+            if len(duplicate_values) > 10:
+                logger.warning(f"... e mais {len(duplicate_values) - 10} valores duplicados")
 
     return df.drop_duplicates(subset=[key_column], keep='first')
 

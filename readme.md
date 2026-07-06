@@ -168,23 +168,23 @@ deactivate
 # 1. Construa a imagem (via cmd entre na pasta do seu projeto)
 docker compose build --no-cache
 
-# 2. caso precise limpar orfãs, remova a imagem
+# caso precise limpar orfãs, remova a imagem
 docker compose down --remove-orphans
 
-# 4. Suba o container (no caso do ETL ele ja inicia automaticamente)
+# Suba o container (no caso do ETL ele ja inicia automaticamente)
 - recomendado, pois inicia, executa, Remove container ao final (sem utilizar recursos desnecessários)
-docker compose run --rm etl
+docker compose run --rm etl &
 
-# Forçar atualização completa
-docker compose run --rm etl --force
+# Forçar atualização completa e Executar em background
+docker compose run -d etl --force
 
-- menos ideal mas funciona
+- menos ideal mas funciona sem forçar atualização completa
 docker compose up -d
 
-# 5. Verifique se está rodando - Deve mostrar status "Up"
+# Verifique se está rodando - Deve mostrar status "Up"
 docker ps
 
-# 6. acompanhe os logs:
+# acompanhe os logs:
 - logs do container:
 docker logs -f dados_rfb-etl
 
