@@ -1145,6 +1145,9 @@ def criar_indices(update=False):
         # 1. Cria/recria PKs
         if update:
             logger.info("Removendo PKs antigas para recriação em atualização...")
+            # AVISO: DROP CASCADE pode causar uma janela onde não há PK/índices suportando queries.
+            # Consultas simultâneas (ORM Django, API HTTP, etc.) podem falhar ou ficar lentas durante essa janela.
+            # Este é um risco conhecido; mitigar com blue-green deployment ou janela de manutenção fica fora de escopo.
             try:
                 cur.execute('ALTER TABLE "empresa" DROP CONSTRAINT IF EXISTS "empresa_pkey" CASCADE;')
             except Exception:
@@ -1186,17 +1189,24 @@ def criar_indices(update=False):
             conn.rollback()
 
         # 2. Índices adicionais (inclui os críticos para consulta por CNPJ).
+        # NOTA: Removemos índices redundantes que duplicavam PKs:
+        # - idx_empresa_cnpj_basico: já coberto por empresa_pkey
+        # - idx_cnae_codigo: já é PK da tabela cnae
+        # - idx_munic_codigo: já é PK da tabela munic
+        # Adicionamos:
+        # - idx_simples_cnpj_basico: necessário para joins/lookups na tabela simples (ausente antes)
         indices_extras = [
-            ("empresa", "cnpj_basico"),   # crítico para buscar_empresa_por_cnpj
             ("socios", "cnpj_basico"),    # crítico para buscar_socios_por_cnpj
             ("empresa", "porte_empresa"),
             ("empresa", "natureza_juridica"),
             ("estabelecimento", "situacao_cadastral"),
             ("estabelecimento", "cnae_fiscal_principal"),
+            ("estabelecimento", "cnae_fiscal_secundaria"),
             ("estabelecimento", "municipio"),
             ("estabelecimento", "uf"),
-            ("cnae", "codigo"),
-            ("munic", "codigo"),
+            ("estabelecimento", "data_inicio_atividade"),
+            ("socios", "nome_socio_razao_social"),
+            ("simples", "cnpj_basico"),   # crítico para joins/lookups em simples (NOVO: antes ausente)
         ]
 
         for tabela, coluna in indices_extras:
@@ -1212,6 +1222,27 @@ def criar_indices(update=False):
                 logger.info(f"Índice {nome_indice} finalizado.")
             except Exception as e:
                 logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
+                conn.rollback()
+
+        # 3. Índices compostos para otimizar buscas por múltiplas colunas (API endpoints)
+        logger.info("Criando índices compostos para endpoints de busca...")
+        indices_compostos = [
+            ("estabelecimento", ["uf", "municipio"], "idx_estabelecimento_uf_municipio"),
+            ("estabelecimento", ["uf", "municipio", "cnpj_basico"], "idx_estabelecimento_uf_municipio_cnpj"),
+        ]
+
+        for tabela, colunas, nome_indice in indices_compostos:
+            try:
+                logger.info(f"Criando índice composto {nome_indice}...")
+                colunas_str = ", ".join(colunas)
+                sql = (
+                    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} "
+                    f"ON {tabela} ({colunas_str});"
+                )
+                cur.execute(sql)
+                logger.info(f"Índice composto {nome_indice} finalizado.")
+            except Exception as e:
+                logger.error(f"Erro ao criar o índice composto {nome_indice}: {e}")
                 conn.rollback()
 
         # Atualiza estatísticas do planner após indexação

@@ -26,6 +26,28 @@ services:
         hard: 65535
     networks:
       - snfisc-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: dados_rfb-api
+    working_dir: /code
+    volumes:
+      - ../dados_rfb:/code
+      - ../dados_rfb_env:/dados_rfb_env:ro
+    env_file:
+      - ../dados_rfb_env/.env
+    environment:
+      - TZ=America/Boa_Vista
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    mem_limit: 1g
+    mem_reservation: 512m
+    networks:
+      - snfisc-network
+
 networks:
   snfisc-network:
     external: true
