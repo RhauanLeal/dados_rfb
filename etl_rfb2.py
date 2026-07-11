@@ -1619,19 +1619,10 @@ def etl_process(processar_simples=True, force_update=False):
                         gc.collect()
 
         logger.info("Arquivos de empresa finalizados!")
-        
-        # Encerramento seguro
-        try:
-            cur.close()
-            conn.close() # Importante fechar a conexão bruta também
-            engine.dispose()
-        except:
-            pass
 
         gc.collect()
 
-        # Reabre conexão
-        conn, engine = connect_db()
+        # Reutilizar cursor para próximo bloco
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
@@ -1722,18 +1713,9 @@ def etl_process(processar_simples=True, force_update=False):
 
         logger.info("Arquivos de estabelecimento finalizados!")
 
-        # Encerramento seguro
-        try:
-            cur.close()
-            conn.close() # Importante fechar a conexão bruta também
-            engine.dispose()
-        except:
-            pass
-
         gc.collect()
 
-        # Reabre conexão se necessário ou usa a existente
-        conn, engine = connect_db()
+        # Reutilizar cursor para próximo bloco
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
@@ -1817,19 +1799,11 @@ def etl_process(processar_simples=True, force_update=False):
                         gc.collect()
 
         logger.info("Arquivos de sócios finalizados!")
-        # Encerramento seguro
-        try:
-            cur.close()
-            conn.close() # Importante fechar a conexão bruta também
-            engine.dispose()
-        except:
-            pass
 
         gc.collect()
 
         if processar_simples:
-            # Reabre conexão
-            conn, engine = connect_db()
+            # Reutilizar cursor para próximo bloco
             cur = conn.cursor()
 
             # Limpa a tabela antes do insert
@@ -1917,18 +1891,9 @@ def etl_process(processar_simples=True, force_update=False):
 
             logger.info("Arquivos do simples finalizados!")
 
-            # Encerramento seguro de recursos
-            try:
-                cur.close()
-                conn.close()
-                engine.dispose()
-            except:
-                pass
-
             gc.collect()
 
-        # Reabre conexão
-        conn, engine = connect_db()
+        # Reutilizar cursor para próximo bloco
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
@@ -2005,8 +1970,7 @@ def etl_process(processar_simples=True, force_update=False):
 
         gc.collect()
 
-        # Reabre conexão
-        conn, engine = connect_db()
+        # Reutilizar cursor para próximo bloco
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
@@ -2083,8 +2047,7 @@ def etl_process(processar_simples=True, force_update=False):
 
         gc.collect()
 
-        # Reabre conexão
-        conn, engine = connect_db()
+        # Reutilizar cursor para próximo bloco
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
@@ -2162,8 +2125,7 @@ def etl_process(processar_simples=True, force_update=False):
 
         gc.collect()
 
-        # Reabre conexão
-        conn, engine = connect_db()
+        # Reutilizar cursor para próximo bloco
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
@@ -2241,8 +2203,7 @@ def etl_process(processar_simples=True, force_update=False):
 
         gc.collect()
 
-        # Reabre conexão
-        conn, engine = connect_db()
+        # Reutilizar cursor para próximo bloco
         cur = conn.cursor()
 
         # Limpa a tabela antes do insert
@@ -2390,13 +2351,6 @@ def etl_process(processar_simples=True, force_update=False):
 
         logger.info("Arquivos de socios_qualificacao finalizados!")
 
-        # Encerramento seguro de recursos
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-        except:
-            pass
 
         gc.collect()
 
