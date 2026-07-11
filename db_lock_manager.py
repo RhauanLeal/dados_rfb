@@ -19,6 +19,14 @@ class LockManager:
         self.conn = conn
         self.timeout_seconds = timeout_seconds
 
+    def _safe_rollback(self) -> None:
+        """Executa rollback de forma segura, capturando qualquer erro."""
+        try:
+            self.conn.rollback()
+            logger.debug("✓ Rollback executado com sucesso")
+        except Exception as e:
+            logger.warning(f"⚠️  Erro ao fazer rollback (continuando): {type(e).__name__}: {e}")
+
     def kill_blocking_sessions(self, table_name: str) -> int:
         """
         Sem privilégio SUPERUSER, apenas faz diagnóstico de sessões bloqueadoras.
@@ -41,10 +49,7 @@ class LockManager:
 
         try:
             # Limpar transação abortada se houver
-            try:
-                self.conn.rollback()
-            except Exception:
-                pass
+            self._safe_rollback()
 
             with self.conn.cursor() as cursor:
                 cursor.execute(query, (f'%{table_name}%',))
@@ -62,13 +67,24 @@ class LockManager:
         # Limpar qualquer transação abortada anterior
         try:
             self.conn.rollback()
-        except Exception:
-            pass
+            logger.info(f"✓ Transação anterior limpa")
+        except Exception as e:
+            logger.warning(f"⚠️  Erro ao fazer rollback: {e}. Reconectando...")
+            # Se rollback falhar, a conexão pode estar em estado inválido
+            # Fechar e obter uma nova conexão
+            try:
+                self.conn.close()
+            except:
+                pass
+            raise psycopg2.OperationalError("Conexão corrompida, necessário reconectar")
 
         for attempt in range(1, max_attempts + 1):
             try:
+                # Reabrir transação e limpar o estado de erro
+                self.conn.reset()
+
                 with self.conn.cursor() as cursor:
-                    # Definir timeout para evitar travamento indefinido
+                    # Definir timeout em uma transação separada/limpa
                     cursor.execute(f"SET statement_timeout = '{self.timeout_seconds}s'")
 
                     # Executar TRUNCATE
@@ -79,6 +95,7 @@ class LockManager:
 
             except psycopg2.errors.LockNotAvailable as e:
                 logger.warning(f"🔒 Lock não disponível na tentativa {attempt}/{max_attempts}")
+                self._safe_rollback()
                 if attempt < max_attempts:
                     logger.info(f"   Aguardando {wait_time}s antes de retry...")
                     time.sleep(wait_time)
@@ -90,6 +107,7 @@ class LockManager:
                 error_str = str(e).lower()
                 if "timeout" in error_str or "lock" in error_str:
                     logger.warning(f"⏱️  Timeout/Lock na tentativa {attempt}/{max_attempts}")
+                    self._safe_rollback()
                     if attempt < max_attempts:
                         logger.info(f"   Aguardando {wait_time}s antes de retry...")
                         time.sleep(wait_time)
@@ -97,10 +115,20 @@ class LockManager:
                     else:
                         raise
                 else:
-                    self.conn.rollback()
+                    self._safe_rollback()
+                    raise
+            except psycopg2.errors.InFailedSqlTransaction as e:
+                logger.warning(f"❌ Transação abortada na tentativa {attempt}/{max_attempts}: {e}")
+                self._safe_rollback()
+                if attempt < max_attempts:
+                    logger.info(f"   Aguardando {wait_time}s antes de retry...")
+                    time.sleep(wait_time)
+                    wait_time *= 2
+                else:
                     raise
             except Exception as e:
-                self.conn.rollback()
+                logger.error(f"❌ Erro inesperado na tentativa {attempt}/{max_attempts}: {e}")
+                self._safe_rollback()
                 raise
 
     def diagnose_locks(self, table_name: str) -> dict:
@@ -131,10 +159,7 @@ class LockManager:
 
         try:
             # Limpar transação abortada se houver
-            try:
-                self.conn.rollback()
-            except Exception:
-                pass
+            self._safe_rollback()
 
             with self.conn.cursor() as cursor:
                 cursor.execute(query, (f'%{table_name}%',))
@@ -165,10 +190,6 @@ class LockManager:
 
         return resultado
 
-        logger.info("🔒 Para matar manualmente uma sessão:")
-        logger.info("   SELECT pg_terminate_backend(PID);")
-        logger.info("=" * 60 + "\n")
-
 
 def configure_connection_timeouts(conn):
     """Configura timeouts para evitar travamentos indefinidos."""
@@ -176,8 +197,9 @@ def configure_connection_timeouts(conn):
         # Limpar transação anterior se houver
         try:
             conn.rollback()
-        except Exception:
-            pass
+            logger.debug("Rollback anterior executado")
+        except Exception as e:
+            logger.debug(f"Nenhuma transação anterior para limpar: {e}")
 
         with conn.cursor() as cursor:
             # Timeout geral para statements (30 segundos)
@@ -188,13 +210,13 @@ def configure_connection_timeouts(conn):
 
             conn.commit()
 
-        logger.info("Timeouts configurados: statement=30s, lock=5s")
+        logger.info("✓ Timeouts configurados: statement=30s, lock=5s")
     except Exception as e:
-        logger.warning(f"Erro ao configurar timeouts: {e}")
+        logger.warning(f"⚠️  Erro ao configurar timeouts: {e}")
         try:
             conn.rollback()
-        except Exception:
-            pass
+        except Exception as rb_err:
+            logger.debug(f"Erro ao fazer rollback após falha: {rb_err}")
 
 
 def retry_on_lock(max_attempts=3, initial_wait=2):
