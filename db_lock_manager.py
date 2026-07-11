@@ -40,6 +40,12 @@ class LockManager:
         """
 
         try:
+            # Limpar transação abortada se houver
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+
             with self.conn.cursor() as cursor:
                 cursor.execute(query, (f'%{table_name}%',))
                 count = cursor.fetchone()[0]
@@ -52,6 +58,12 @@ class LockManager:
         """TRUNCATE com timeout e retry automático (3 tentativas)."""
         max_attempts = 3
         wait_time = 2
+
+        # Limpar qualquer transação abortada anterior
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -110,6 +122,12 @@ class LockManager:
         """
 
         try:
+            # Limpar transação abortada se houver
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+
             with self.conn.cursor() as cursor:
                 cursor.execute(query, (f'%{table_name}%',))
                 rows = cursor.fetchall()
@@ -133,6 +151,12 @@ class LockManager:
 def configure_connection_timeouts(conn):
     """Configura timeouts para evitar travamentos indefinidos."""
     try:
+        # Limpar transação anterior se houver
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
         with conn.cursor() as cursor:
             # Timeout geral para statements (30 segundos)
             cursor.execute("SET statement_timeout = '30s'")
@@ -142,10 +166,13 @@ def configure_connection_timeouts(conn):
 
             conn.commit()
 
-        logger.info("⏱️  Timeouts configurados: statement=30s, lock=5s")
+        logger.info("Timeouts configurados: statement=30s, lock=5s")
     except Exception as e:
         logger.warning(f"Erro ao configurar timeouts: {e}")
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 def retry_on_lock(max_attempts=3, initial_wait=2):
