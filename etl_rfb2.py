@@ -1086,29 +1086,63 @@ def apply_fixes(conn, processar_simples=True, table_suffix=""):
         # Inserções simples (Tabelas auxiliares são pequenas, aqui é instantâneo)
         # Corrigindo Países
         logger.info("Inserindo correções em pais...")
-        cur.execute(f"""
-            INSERT INTO public.pais{table_suffix} (codigo, descricao)
-            VALUES
-                (008, 'ABU DHABI'),
-                (009, 'DIRCE'),
-                (015, 'ALAND, ILHAS'),
-                (150, 'JERSEY, ILHA DO CANAL'),
-                (151, 'CANARIAS, ILHAS'),
-                (200, 'CURACAO'),
-                (321, 'GUERNSEY'),
-                (359, 'MAN, ILHA DE'),
-                (367, 'INGLATERRA'),
-                (393, 'JERSEY'),
-                (449, 'MACEDONIA (ANTIGA REP. IUGOSLAVA)'),
-                (452, 'MADEIRA, ILHA DA'),
-                (498, 'MOLDAVIA'),
-                (578, 'PALESTINA'),
-                (678, 'SAO TOME E PRINCIPE'),
-                (699, 'SAO MARTINHO, ILHA DE (PARTE HOLANDESA)'),
-                (737, 'SERVIA'),
-                (994, 'AZERBAIJAO')
-            ON CONFLICT (codigo) DO NOTHING;
-        """)
+
+        # Se em staging, usar DELETE+INSERT simples (sem constraints)
+        # Se em produção, usar ON CONFLICT (com constraints)
+        if table_suffix == "_staging":
+            # Staging: sem constraints, usar DELETE + INSERT
+            cur.execute(f"""
+                DELETE FROM public.pais{table_suffix}
+                WHERE codigo IN (008, 009, 015, 150, 151, 200, 321, 359, 367, 393,
+                                449, 452, 498, 578, 678, 699, 737, 994);
+            """)
+            cur.execute(f"""
+                INSERT INTO public.pais{table_suffix} (codigo, descricao)
+                VALUES
+                    (008, 'ABU DHABI'),
+                    (009, 'DIRCE'),
+                    (015, 'ALAND, ILHAS'),
+                    (150, 'JERSEY, ILHA DO CANAL'),
+                    (151, 'CANARIAS, ILHAS'),
+                    (200, 'CURACAO'),
+                    (321, 'GUERNSEY'),
+                    (359, 'MAN, ILHA DE'),
+                    (367, 'INGLATERRA'),
+                    (393, 'JERSEY'),
+                    (449, 'MACEDONIA (ANTIGA REP. IUGOSLAVA)'),
+                    (452, 'MADEIRA, ILHA DA'),
+                    (498, 'MOLDAVIA'),
+                    (578, 'PALESTINA'),
+                    (678, 'SAO TOME E PRINCIPE'),
+                    (699, 'SAO MARTINHO, ILHA DE (PARTE HOLANDESA)'),
+                    (737, 'SERVIA'),
+                    (994, 'AZERBAIJAO');
+            """)
+        else:
+            # Produção: com constraints, usar ON CONFLICT
+            cur.execute(f"""
+                INSERT INTO public.pais{table_suffix} (codigo, descricao)
+                VALUES
+                    (008, 'ABU DHABI'),
+                    (009, 'DIRCE'),
+                    (015, 'ALAND, ILHAS'),
+                    (150, 'JERSEY, ILHA DO CANAL'),
+                    (151, 'CANARIAS, ILHAS'),
+                    (200, 'CURACAO'),
+                    (321, 'GUERNSEY'),
+                    (359, 'MAN, ILHA DE'),
+                    (367, 'INGLATERRA'),
+                    (393, 'JERSEY'),
+                    (449, 'MACEDONIA (ANTIGA REP. IUGOSLAVA)'),
+                    (452, 'MADEIRA, ILHA DA'),
+                    (498, 'MOLDAVIA'),
+                    (578, 'PALESTINA'),
+                    (678, 'SAO TOME E PRINCIPE'),
+                    (699, 'SAO MARTINHO, ILHA DE (PARTE HOLANDESA)'),
+                    (737, 'SERVIA'),
+                    (994, 'AZERBAIJAO')
+                ON CONFLICT (codigo) DO NOTHING;
+            """)
 
         # # 1. DELETE Duplicatas - CUIDADO: Pode demorar muito se a tabela empresa for grande
         # logger.info("Removendo duplicatas da tabela empresa...")
@@ -1140,10 +1174,10 @@ def apply_fixes(conn, processar_simples=True, table_suffix=""):
         # logger.info("Corrigindo porte na tabela empresa...")
         # cur.execute("UPDATE empresa SET porte = '00' WHERE porte = '' OR porte IS NULL;")
 
-        # 4. CNPJs problemáticos conhecidos no Simples
-        if processar_simples:
+        # 4. CNPJs problemáticos conhecidos no Simples (apenas em produção, staging vazio)
+        if processar_simples and table_suffix == "":
             logger.info("Limpando registros problemáticos da tabela Simples...")
-            # Aqui usamos DELETE normal. Como não tem PK, ele funciona sem erros.
+            # Apenas em produção (staging já foi carregado limpo)
             cur.execute(f"""
                 DELETE FROM public.simples{table_suffix}
                 WHERE cnpj_basico IN ('24417449', '24539162', '30721933', '30728066',

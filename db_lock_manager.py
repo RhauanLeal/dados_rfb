@@ -281,6 +281,9 @@ class StagingManager:
         """Retorna contagem de linhas em tabelas originais e staging (validação pré-swap)."""
         counts = {}
         with self.conn.cursor() as cursor:
+            # Aumentar timeout para COUNT(*) em tabelas grandes
+            cursor.execute("SET statement_timeout = '300s'")
+
             for table_name in self.STAGING_TABLES:
                 staging_name = f"{table_name}_staging"
                 try:
@@ -295,6 +298,10 @@ class StagingManager:
                 except Exception as e:
                     logger.warning(f"Erro ao contar linhas em {table_name}: {e}")
                     counts[table_name] = {'original': 0, 'staging': 0}
+
+            # Restaurar timeout padrão
+            cursor.execute("SET statement_timeout = '30s'")
+
         return counts
 
     def validate_before_swap(self) -> bool:
