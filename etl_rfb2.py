@@ -28,7 +28,7 @@ import time
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from db_lock_manager import LockManager, configure_connection_timeouts
-from email_notifier import enviar_email_erro, enviar_email_sucesso, decorador_com_notificacao
+from email_notifier import enviar_email_erro, enviar_email_sucesso, decorador_com_notificacao, enviar_email_erro_com_locks
 import traceback
 
 '''
@@ -1511,7 +1511,26 @@ def etl_process(processar_simples=True, force_update=False):
             lock_mgr.truncate_with_timeout('empresa')
         except Exception as e:
             logger.error(f"Falha ao limpar empresa: {e}")
-            lock_mgr.diagnose_locks('empresa')
+            # Diagnosticar locks e enviar e-mail com instruções
+            resultado_locks = lock_mgr.diagnose_locks('empresa')
+
+            if resultado_locks.get('pids'):
+                # Há locks! Enviar e-mail com instruções para matá-los
+                enviar_email_erro_com_locks(
+                    titulo="Erro ao TRUNCATE - Tabela Empresa Bloqueada",
+                    mensagem=f"Falha ao limpar empresa: {str(e)}",
+                    table_name='empresa',
+                    pids=resultado_locks['pids'],
+                    sessoes=resultado_locks['sessoes'],
+                    rastreamento=traceback.format_exc()
+                )
+            else:
+                # Sem locks específicos, enviar e-mail de erro geral
+                enviar_email_erro(
+                    titulo="Erro ao TRUNCATE na Tabela Empresa",
+                    mensagem=f"Falha ao limpar empresa: {str(e)}",
+                    rastreamento=traceback.format_exc()
+                )
             raise
  
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)

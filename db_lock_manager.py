@@ -103,8 +103,11 @@ class LockManager:
                 self.conn.rollback()
                 raise
 
-    def diagnose_locks(self, table_name: str) -> None:
-        """Função de diagnóstico para locks em caso de erro."""
+    def diagnose_locks(self, table_name: str) -> dict:
+        """
+        Função de diagnóstico para locks em caso de erro.
+        Retorna dict com PIDs e informações das sessões bloqueadoras.
+        """
         logger.info(f"\n📊 === DIAGNÓSTICO DE LOCKS: {table_name} ===")
 
         query = """
@@ -120,6 +123,11 @@ class LockManager:
         ORDER BY query_start DESC
         LIMIT 10
         """
+
+        resultado = {
+            "pids": [],
+            "sessoes": []
+        }
 
         try:
             # Limpar transação abortada se houver
@@ -138,10 +146,24 @@ class LockManager:
                         pid, user, app, state, query_text, duration = row
                         logger.info(f"  PID: {pid} | User: {user} | State: {state} | "
                                    f"Duration: {duration:.1f}s | App: {app}")
+
+                        resultado["pids"].append(pid)
+                        resultado["sessoes"].append({
+                            "pid": pid,
+                            "user": user,
+                            "state": state,
+                            "duration": duration
+                        })
                 else:
                     logger.info(f"Nenhuma sessão ativa encontrada para {table_name}")
         except Exception as e:
             logger.warning(f"Erro ao diagnosticar locks: {e}")
+
+        logger.info("🔒 Para matar manualmente uma sessão:")
+        logger.info("   SELECT pg_terminate_backend(PID);")
+        logger.info("=" * 60 + "\n")
+
+        return resultado
 
         logger.info("🔒 Para matar manualmente uma sessão:")
         logger.info("   SELECT pg_terminate_backend(PID);")

@@ -129,6 +129,99 @@ def enviar_email_sucesso(titulo: str, mensagem: str = "", detalhes: str = ""):
         return False
 
 
+def enviar_email_erro_com_locks(titulo: str, mensagem: str, table_name: str, pids: list, sessoes: list, rastreamento: str = ""):
+    """
+    Envia e-mail de erro COM instruções para matar sessões bloqueadoras.
+
+    Args:
+        titulo: Título do e-mail
+        mensagem: Mensagem de erro
+        table_name: Nome da tabela bloqueada
+        pids: Lista de PIDs bloqueadores
+        sessoes: Lista de dicts com info das sessões
+        rastreamento: Stack trace (opcional)
+    """
+    if not GMAIL_ENABLED:
+        logger.warning("AVISO: E-mail nao configurado.")
+        return False
+
+    try:
+        # Montar instruções SQL para matar as sessões
+        sql_commands = []
+        for pid in pids:
+            sql_commands.append(f"SELECT pg_terminate_backend({pid});")
+
+        sql_all = "\n".join(sql_commands)
+
+        # Montar detalhes das sessões
+        sessoes_info = "\n".join([
+            f"  PID {s['pid']}: user={s['user']}, state={s['state']}, duration={s['duration']:.1f}s"
+            for s in sessoes
+        ])
+
+        corpo = f"""
+ERRO NO ETL - LOCK NA TABELA
+{'='*60}
+Data/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Titulo: {titulo}
+
+Mensagem:
+{mensagem}
+
+Tabela Bloqueada: {table_name}
+
+Sessoes Bloqueadoras:
+{sessoes_info}
+
+SOLUCAO RAPIDA - Execute em seu PostgreSQL:
+{'-'*60}
+{sql_all}
+
+OU conecte no banco e execute:
+
+  sudo -u postgres psql -d dados_rfb
+
+  E depois execute os comandos abaixo:
+
+{chr(10).join([f"  {cmd}" for cmd in sql_commands])}
+
+{'-'*60}
+
+ALTERNATIVA - Uma linha (sem conectar):
+
+  sudo -u postgres psql -d dados_rfb -c "{'; '.join(sql_commands)}"
+
+{'-'*60}
+
+Apos matar as sessoes, reinicie o ETL:
+
+  docker stop dados-rbf-etl
+  docker start dados-rbf-etl
+
+{f'Stack Trace:{chr(10)}{rastreamento}' if rastreamento else ''}
+
+{'='*60}
+        """
+
+        msg = MIMEText(corpo)
+        msg["Subject"] = f"ERRO COM LOCKS - {titulo}"
+        msg["From"] = GMAIL_FROM
+        msg["To"] = GMAIL_TO
+
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_PASSWORD)
+            server.send_message(msg)
+
+        logger.info(f"OK: E-mail com instrucoes de locks enviado para {GMAIL_TO}")
+        return True
+
+    except Exception as e:
+        logger.error(f"ERRO ao enviar e-mail: {e}")
+        return False
+
+
 def decorador_com_notificacao(func):
     """
     Decorator que envolve uma função e envia e-mail se houver exceção.
