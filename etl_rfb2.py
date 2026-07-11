@@ -24,6 +24,9 @@ from urllib.parse import urlparse, parse_qs, unquote, quote
 import io
 import csv
 import psutil
+import time
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 '''
 Sistema de ETL dos dados abertos da Receita Federal do Brasil (RFB)
@@ -107,8 +110,8 @@ def calcular_chunks_automatico():
 CHUNK_ROWS, CHUNK_TO_SQL = calcular_chunks_automatico()
 logger.info(f"Usando CHUNK_ROWS={CHUNK_ROWS:,}, CHUNK_TO_SQL={CHUNK_TO_SQL:,}")
 
-# Downloads simultâneos (altere conforme a largura de banda Disponível)
-DOWNLOAD_WORKERS = 3
+# Downloads simultâneos (reduzido para evitar desconexões do servidor)
+DOWNLOAD_WORKERS = 2
 
 # Ativado via --progress na linha de comando
 _show_progress = False
@@ -908,6 +911,7 @@ def _get_download_session() -> requests.Session:
     Retorna (ou cria) uma Session configurada para download via WebDAV do share público.
     Usa Basic auth (token, '') — mesmo mecanismo usado pelo PROPFIND no scraper.
     Thread-safe via double-checked locking.
+    Inclui retry automático com backoff exponencial para desconexões.
     """
     global _download_session
     if _download_session is None:
@@ -922,6 +926,17 @@ def _get_download_session() -> requests.Session:
                     logger.info(f"Sessão WebDAV inicializada com token: {token}")
                 else:
                     logger.warning("SHARE_TOKEN não Disponível para autenticação WebDAV.")
+
+                retry_strategy = Retry(
+                    total=1,
+                    backoff_factor=5,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["GET", "HEAD"]
+                )
+                adapter = HTTPAdapter(max_retries=retry_strategy)
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+
                 _download_session = session
     return _download_session
 
@@ -948,7 +963,7 @@ def check_diff(url, file_name):
 
 
 # Função para baixar arquivos com barra de progresso
-def download_file(url, output_path, tqdm_position=0):
+def download_file(url, output_path, tqdm_position=0, max_retries=4):
     # Extrai o nome do arquivo da URL:
     #   WebDAV: .../public.php/webdav/Dados/.../Cnaes.zip → "Cnaes.zip"
     #   (fallback legado): .../download?path=...&files=Cnaes.zip → "Cnaes.zip"
@@ -965,55 +980,76 @@ def download_file(url, output_path, tqdm_position=0):
         logger.info(f"Arquivo {basename} já está atualizado.")
         return file_name
 
-    logger.info(f"Baixando {basename}...")
-
     session = _get_download_session()
-    response = session.get(url, stream=True, timeout=300)
 
-    if response.status_code != 200:
-        logger.error(f"Erro HTTP {response.status_code} ao baixar {basename}")
-        return None
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Baixando {basename}... (tentativa {attempt}/{max_retries})")
+            response = session.get(url, stream=True, timeout=300)
 
-    content_type = response.headers.get('Content-Type', '')
-    if 'text/html' in content_type:
-        logger.error(
-            f"Nextcloud retornou HTML para {basename} (Content-Type: {content_type}). "
-            "Token expirado ou sessão inválida."
-        )
-        return None
+            if response.status_code != 200:
+                logger.error(f"Erro HTTP {response.status_code} ao baixar {basename}")
+                return None
 
-    total_bytes = int(response.headers.get('content-length', 0))
-    bytes_written = 0
+            content_type = response.headers.get('Content-Type', '')
+            if 'text/html' in content_type:
+                logger.error(
+                    f"Nextcloud retornou HTML para {basename} (Content-Type: {content_type}). "
+                    "Token expirado ou sessão inválida."
+                )
+                return None
 
-    if _show_progress:
-        pbar = tqdm(
-            total=total_bytes if total_bytes > 0 else None,
-            unit='B', unit_scale=True, unit_divisor=1024,
-            desc=f"{basename[:35]:<35}", ncols=90, leave=True,
-            position=tqdm_position,
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-        )
+            total_bytes = int(response.headers.get('content-length', 0))
+            bytes_written = 0
 
-    with open(file_name, "wb") as f:
-        for chunk in response.iter_content(chunk_size=65536):
-            if chunk:
-                f.write(chunk)
-                bytes_written += len(chunk)
-                if _show_progress:
-                    pbar.update(len(chunk))
+            if _show_progress:
+                pbar = tqdm(
+                    total=total_bytes if total_bytes > 0 else None,
+                    unit='B', unit_scale=True, unit_divisor=1024,
+                    desc=f"{basename[:35]:<35}", ncols=90, leave=True,
+                    position=tqdm_position,
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+                )
 
-    if _show_progress:
-        pbar.close()
+            with open(file_name, "wb") as f:
+                for chunk in response.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+                        bytes_written += len(chunk)
+                        if _show_progress:
+                            pbar.update(len(chunk))
 
-    size_mb = bytes_written / (1024 * 1024)
-    logger.info(f"Download concluído para {basename} ({size_mb:.1f} MB)")
+            if _show_progress:
+                pbar.close()
 
-    if bytes_written == 0:
-        logger.error(f"Arquivo {basename} baixado com 0 bytes! Removendo arquivo inválido.")
-        os.remove(file_name)
-        return None
+            size_mb = bytes_written / (1024 * 1024)
+            logger.info(f"Download concluído para {basename} ({size_mb:.1f} MB)")
 
-    return file_name
+            if bytes_written == 0:
+                logger.error(f"Arquivo {basename} baixado com 0 bytes! Removendo arquivo inválido.")
+                os.remove(file_name)
+                return None
+
+            return file_name
+
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.Timeout) as e:
+            if os.path.exists(file_name):
+                os.remove(file_name)
+
+            if attempt < max_retries:
+                wait_time = 5 * attempt
+                logger.warning(
+                    f"Falha ao baixar {basename}: {type(e).__name__}. "
+                    f"Aguardando {wait_time}s antes de tentar novamente..."
+                )
+                time.sleep(wait_time)
+            else:
+                logger.error(
+                    f"Falha ao baixar {basename} após {max_retries} tentativas: {type(e).__name__}. {str(e)}"
+                )
+                return None
 
 
 def apply_fixes(processar_simples=True):
@@ -1375,10 +1411,14 @@ def etl_process(processar_simples=True, force_update=False):
                 executor.submit(download_file, url, OUTPUT_FILES_PATH, i % DOWNLOAD_WORKERS)
                 for i, url in enumerate(lista_zips)
             ]
-            zip_files = [f.result() for f in futures]
-
-        # Filtra downloads que falharam
-        zip_files = [f for f in zip_files if f is not None]
+            zip_files = []
+            for i, future in enumerate(futures):
+                try:
+                    result = future.result()
+                    if result is not None:
+                        zip_files.append(result)
+                except Exception as e:
+                    logger.error(f"Erro ao processar download {i+1}: {type(e).__name__}: {str(e)}")
 
         if not zip_files:
             logger.error("Nenhum arquivo foi baixado com sucesso. Encerrando.")
