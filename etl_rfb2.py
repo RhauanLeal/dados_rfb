@@ -1067,6 +1067,8 @@ def apply_fixes(processar_simples=True):
     cur = conn.cursor()
 
     try:
+        # Timeout específico para apply_fixes (30min + 10% = 33min = 1980s)
+        cur.execute("SET statement_timeout = '1980s'")
         logger.info("APLICANDO CORREÇÕES NA BASE DE DADOS...")
 
         # Inserções simples (Tabelas auxiliares são pequenas, aqui é instantâneo)
@@ -1178,6 +1180,9 @@ def criar_indices(update=False):
 
         logger.info("Aumentando memória de manutenção para otimização...")
         cur.execute("SET maintenance_work_mem = '2GB';")
+
+        # Timeout específico para criar_indices (2h + 10% = 2h20min = 7920s)
+        cur.execute("SET statement_timeout = '7920s';")
 
         if not update:
             logger.info("Primeira carga: criando índices. Isso pode levar várias horas...")
@@ -1507,7 +1512,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela empresa (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('empresa')
         except Exception as e:
             logger.error(f"Falha ao limpar empresa: {e}")
@@ -1616,7 +1621,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela estabelecimento (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('estabelecimento')
         except Exception as e:
             logger.error(f"Falha ao limpar estabelecimento: {e}")
@@ -1719,7 +1724,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela socios (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('socios')
         except Exception as e:
             logger.error(f"Falha ao limpar socios: {e}")
@@ -1816,7 +1821,7 @@ def etl_process(processar_simples=True, force_update=False):
             # Limpa a tabela antes do insert
             logger.info("Limpando dados da tabela simples (mantendo estrutura)...")
             try:
-                lock_mgr = LockManager(conn, timeout_seconds=3600)
+                lock_mgr = LockManager(conn, timeout_seconds=30)
                 lock_mgr.truncate_with_timeout('simples')
             except Exception as e:
                 logger.error(f"Falha ao limpar simples: {e}")
@@ -1916,7 +1921,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela cnae (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('cnae')
         except Exception as e:
             logger.error(f"Falha ao limpar cnae: {e}")
@@ -1995,7 +2000,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela estabelecimento_motivo (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('estabelecimento_motivo')
         except Exception as e:
             logger.error(f"Falha ao limpar estabelecimento_motivo: {e}")
@@ -2074,7 +2079,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela munic (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('munic')
         except Exception as e:
             logger.error(f"Falha ao limpar munic: {e}")
@@ -2154,7 +2159,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela empresa_natureza_juridica (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('empresa_natureza_juridica')
         except Exception as e:
             logger.error(f"Falha ao limpar empresa_natureza_juridica: {e}")
@@ -2234,7 +2239,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela pais (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('pais')
         except Exception as e:
             logger.error(f"Falha ao limpar pais: {e}")
@@ -2315,7 +2320,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela socios_qualificacao (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=3600)
+            lock_mgr = LockManager(conn, timeout_seconds=30)
             lock_mgr.truncate_with_timeout('socios_qualificacao')
         except Exception as e:
             logger.error(f"Falha ao limpar socios_qualificacao: {e}")
