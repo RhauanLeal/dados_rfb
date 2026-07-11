@@ -27,8 +27,8 @@ import psutil
 import time
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from db_lock_manager import LockManager, configure_connection_timeouts, AdvisoryLock, StagingManager
-from email_notifier import enviar_email_erro, enviar_email_sucesso, decorador_com_notificacao, enviar_email_erro_com_locks
+from db_lock_manager import configure_connection_timeouts, AdvisoryLock, StagingManager
+from email_notifier import enviar_email_erro, enviar_email_sucesso, decorador_com_notificacao
 import traceback
 
 '''
@@ -590,7 +590,7 @@ def verificar_nova_atualizacao(force_update=False):
 
 # Cria tabela info_dados e indexes
 def criar_tabela_info_dados():
-    conn, engine = connect_db()
+    conn, _ = connect_db()
     with conn.cursor() as cur:
         cur.execute("""
         CREATE TABLE IF NOT EXISTS info_dados (
@@ -879,7 +879,7 @@ def create_tables():
 # insere os dados na tabela info_dados
 def inserir_info_dados(info):
     # Reabre conexão para próximo bloco
-    conn, engine = connect_db()
+    conn, _ = connect_db()
     cur = conn.cursor()
 
     cur.execute("""
@@ -2397,7 +2397,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Enviar e-mail de sucesso
         enviar_email_sucesso(
             titulo="ETL Concluído com Sucesso",
-            mensagem=f"O processo de ETL foi concluído com sucesso!",
+            mensagem="O processo de ETL foi concluído com sucesso!",
             detalhes=f"Tempo total: {tempo_total}\nData/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
@@ -2421,18 +2421,18 @@ def etl_process(processar_simples=True, force_update=False):
         if conn_lock:
             try:
                 conn_lock.close()
-            except:
+            except Exception:
                 pass
         # Fechar conexão de trabalho se ainda estiver aberta
         if conn:
             try:
                 conn.close()
-            except:
+            except Exception:
                 pass
         if engine:
             try:
                 engine.dispose()
-            except:
+            except Exception:
                 pass
 
 
