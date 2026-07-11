@@ -27,6 +27,9 @@ import psutil
 import time
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+from db_lock_manager import LockManager, configure_connection_timeouts
+from email_notifier import enviar_email_erro, enviar_email_sucesso, decorador_com_notificacao
+import traceback
 
 '''
 Sistema de ETL dos dados abertos da Receita Federal do Brasil (RFB)
@@ -235,6 +238,9 @@ def connect_db(autocommit=False):
 
         if autocommit:
             conn.set_session(autocommit=True)
+
+        # Configurar timeouts para evitar travamentos indefinidos
+        configure_connection_timeouts(conn)
 
         logger.info("✅ Conexão com o banco de dados estabelecida com sucesso")
         return conn, engine
@@ -1373,6 +1379,7 @@ def remove_duplicates_by_key(df: pd.DataFrame, key_column: str) -> pd.DataFrame:
 
 
 # Função principal do ETL
+@decorador_com_notificacao
 def etl_process(processar_simples=True, force_update=False):
     try:
         # Criar os diretórios caso não existam
@@ -1499,8 +1506,13 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela empresa (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "empresa" ;')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('empresa')
+        except Exception as e:
+            logger.error(f"Falha ao limpar empresa: {e}")
+            lock_mgr.diagnose_locks('empresa')
+            raise
  
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_empresa:
@@ -1584,8 +1596,20 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela estabelecimento (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "estabelecimento";')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('estabelecimento')
+        except Exception as e:
+            logger.error(f"Falha ao limpar estabelecimento: {e}")
+            lock_mgr.diagnose_locks('estabelecimento')
+            # Enviar notificação de erro
+            enviar_email_erro(
+                titulo="Erro ao TRUNCATE na Tabela Estabelecimento",
+                mensagem=f"Falha ao limpar a tabela estabelecimento: {str(e)}",
+                detalhes="Verifique locks no PostgreSQL ou privilégios de TRUNCATE",
+                rastreamento=traceback.format_exc()
+            )
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_estabelecimento:
@@ -1675,8 +1699,13 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela socios (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "socios";')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('socios')
+        except Exception as e:
+            logger.error(f"Falha ao limpar socios: {e}")
+            lock_mgr.diagnose_locks('socios')
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_socios:
@@ -1767,8 +1796,13 @@ def etl_process(processar_simples=True, force_update=False):
 
             # Limpa a tabela antes do insert
             logger.info("Limpando dados da tabela simples (mantendo estrutura)...")
-            cur.execute('TRUNCATE TABLE "simples";')
-            conn.commit()
+            try:
+                lock_mgr = LockManager(conn, timeout_seconds=30)
+                lock_mgr.truncate_with_timeout('simples')
+            except Exception as e:
+                logger.error(f"Falha ao limpar simples: {e}")
+                lock_mgr.diagnose_locks('simples')
+                raise
 
             # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
             for arquivo, zip_path in arquivos_simples:
@@ -1862,8 +1896,13 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela cnae (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "cnae";')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('cnae')
+        except Exception as e:
+            logger.error(f"Falha ao limpar cnae: {e}")
+            lock_mgr.diagnose_locks('cnae')
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_cnae:
@@ -1936,8 +1975,13 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela estabelecimento_motivo (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "estabelecimento_motivo" ;')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('estabelecimento_motivo')
+        except Exception as e:
+            logger.error(f"Falha ao limpar estabelecimento_motivo: {e}")
+            lock_mgr.diagnose_locks('estabelecimento_motivo')
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_estabelecimento_motivo:
@@ -2010,8 +2054,13 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela munic (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "munic";')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('munic')
+        except Exception as e:
+            logger.error(f"Falha ao limpar munic: {e}")
+            lock_mgr.diagnose_locks('munic')
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_munic:
@@ -2085,8 +2134,13 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela empresa_natureza_juridica (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "empresa_natureza_juridica";')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('empresa_natureza_juridica')
+        except Exception as e:
+            logger.error(f"Falha ao limpar empresa_natureza_juridica: {e}")
+            lock_mgr.diagnose_locks('empresa_natureza_juridica')
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_empresa_natureza_juridica:
@@ -2160,8 +2214,13 @@ def etl_process(processar_simples=True, force_update=False):
 
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela pais (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "pais";')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('pais')
+        except Exception as e:
+            logger.error(f"Falha ao limpar pais: {e}")
+            lock_mgr.diagnose_locks('pais')
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_pais:
@@ -2236,8 +2295,13 @@ def etl_process(processar_simples=True, force_update=False):
         # Arquivos de qualificação de sócios:
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela socios_qualificacao (mantendo estrutura)...")
-        cur.execute('TRUNCATE TABLE "socios_qualificacao" ;')
-        conn.commit()
+        try:
+            lock_mgr = LockManager(conn, timeout_seconds=30)
+            lock_mgr.truncate_with_timeout('socios_qualificacao')
+        except Exception as e:
+            logger.error(f"Falha ao limpar socios_qualificacao: {e}")
+            lock_mgr.diagnose_locks('socios_qualificacao')
+            raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
         for arquivo, zip_path in arquivos_socios_qualificacao:
@@ -2330,11 +2394,28 @@ def etl_process(processar_simples=True, force_update=False):
         shutil.rmtree(OUTPUT_FILES_PATH)
         logger.info("Arquivos removidos após a carga no banco.")
 
-        logger.info(f"ETL concluído com sucesso em {converter_segundos(start_time, datetime.now())}")
+        tempo_total = converter_segundos(start_time, datetime.now())
+        logger.info(f"ETL concluído com sucesso em {tempo_total}")
+
+        # Enviar e-mail de sucesso
+        enviar_email_sucesso(
+            titulo="ETL Concluído com Sucesso",
+            mensagem=f"O processo de ETL foi concluído com sucesso!",
+            detalhes=f"Tempo total: {tempo_total}\nData/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
     except Exception as e:
         logger.error(f"Erro no processo ETL: {e}", exc_info=True)
         logger.critical("Não foi possível iniciar o aplicativo")
+
+        # Enviar e-mail de erro
+        enviar_email_erro(
+            titulo="❌ Falha no ETL",
+            mensagem=f"Erro: {str(e)}",
+            detalhes=f"Tempo até falha: {converter_segundos(start_time, datetime.now())}",
+            rastreamento=traceback.format_exc()
+        )
+
         # Encerramento seguro de recursos
         try:
             cur.close()
