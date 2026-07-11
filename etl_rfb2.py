@@ -1961,13 +1961,6 @@ def etl_process(processar_simples=True, force_update=False):
         logger.info("Arquivos de cnae finalizados!")
 
         # Encerramento seguro
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-        except:
-            pass
-
         gc.collect()
 
         # Reutilizar cursor para próximo bloco
@@ -2038,13 +2031,6 @@ def etl_process(processar_simples=True, force_update=False):
         logger.info("Arquivos de estabelecimento_motivo finalizados!")
 
         # Encerramento seguro de recursos
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-        except:
-            pass
-
         gc.collect()
 
         # Reutilizar cursor para próximo bloco
@@ -2116,13 +2102,6 @@ def etl_process(processar_simples=True, force_update=False):
         logger.info("Arquivos de municípios finalizados!")
 
         # Encerramento seguro de recursos
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-        except:
-            pass
-
         gc.collect()
 
         # Reutilizar cursor para próximo bloco
@@ -2194,13 +2173,6 @@ def etl_process(processar_simples=True, force_update=False):
         logger.info("Arquivos de empresa_natureza_juridica finalizados!")
 
         # Encerramento seguro de recursos
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-        except:
-            pass
-
         gc.collect()
 
         # Reutilizar cursor para próximo bloco
@@ -2272,13 +2244,6 @@ def etl_process(processar_simples=True, force_update=False):
         logger.info("Arquivos de países finalizados!")
 
         # Encerramento seguro de conexões
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-        except:
-            pass
-
         gc.collect()
 
         # Reabre conexão para próximo bloco
