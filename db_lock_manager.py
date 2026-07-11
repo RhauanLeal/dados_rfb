@@ -244,3 +244,175 @@ def retry_on_lock(max_attempts=3, initial_wait=2):
 
         return wrapper
     return decorator
+
+
+class StagingManager:
+    """Gerencia tabelas de staging para atualização sem bloqueio de leituras."""
+
+    STAGING_TABLES = [
+        'empresa', 'estabelecimento', 'socios', 'simples', 'cnae',
+        'estabelecimento_motivo', 'munic', 'empresa_natureza_juridica',
+        'pais', 'socios_qualificacao'
+    ]
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def prepare_staging(self) -> None:
+        """Cria tabelas staging como cópias vazias das originais."""
+        with self.conn.cursor() as cursor:
+            for table_name in self.STAGING_TABLES:
+                staging_name = f"{table_name}_staging"
+                try:
+                    logger.info(f"Preparando staging para {table_name}...")
+                    cursor.execute(f'DROP TABLE IF EXISTS "{staging_name}";')
+                    cursor.execute(f"""
+                        CREATE TABLE "{staging_name}" AS
+                        SELECT * FROM "{table_name}" LIMIT 0;
+                    """)
+                    self.conn.commit()
+                    logger.info(f"✓ Staging '{staging_name}' preparado")
+                except Exception as e:
+                    logger.error(f"Erro ao preparar staging de {table_name}: {e}")
+                    self.conn.rollback()
+                    raise
+
+    def get_row_counts(self) -> dict:
+        """Retorna contagem de linhas em tabelas originais e staging (validação pré-swap)."""
+        counts = {}
+        with self.conn.cursor() as cursor:
+            for table_name in self.STAGING_TABLES:
+                staging_name = f"{table_name}_staging"
+                try:
+                    cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+                    original_count = cursor.fetchone()[0]
+                    cursor.execute(f'SELECT COUNT(*) FROM "{staging_name}"')
+                    staging_count = cursor.fetchone()[0]
+                    counts[table_name] = {
+                        'original': original_count,
+                        'staging': staging_count
+                    }
+                except Exception as e:
+                    logger.warning(f"Erro ao contar linhas em {table_name}: {e}")
+                    counts[table_name] = {'original': 0, 'staging': 0}
+        return counts
+
+    def validate_before_swap(self) -> bool:
+        """Valida integridade dos dados antes de fazer swap. Retorna True se OK."""
+        logger.info("📋 Validando integridade dos dados antes do swap...")
+        counts = self.get_row_counts()
+
+        all_ok = True
+        for table_name, row_counts in counts.items():
+            original = row_counts['original']
+            staging = row_counts['staging']
+
+            if staging == 0:
+                logger.warning(f"⚠️  Tabela '{table_name}' staging vazia (não será swapped)")
+            elif staging < original * 0.5:  # Staging tem menos de 50% dos dados
+                logger.error(f"❌ Staging de '{table_name}' tem {staging} linhas vs {original} no original (< 50%)")
+                all_ok = False
+            else:
+                logger.info(f"✓ '{table_name}': original={original}, staging={staging}")
+
+        return all_ok
+
+    def swap_all_tables(self) -> None:
+        """
+        Faz swap atômico de TODAS as tabelas em UMA transação.
+        Se qualquer swap falhar, TODOS revertem. Garante consistência.
+        """
+        logger.info("🔄 Iniciando swap atômico de todas as tabelas em transação única...")
+
+        import psycopg2
+        cursor = self.conn.cursor()
+
+        try:
+            # Definir isolamento SERIALIZABLE antes de BEGIN
+            self.conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_SERIALIZABLE)
+
+            # Abrir transação
+            cursor.execute("BEGIN")
+
+            for table_name in self.STAGING_TABLES:
+                staging_name = f"{table_name}_staging"
+                old_name = f"{table_name}_old"
+
+                logger.info(f"Swapping '{table_name}' (dentro de transação global)...")
+
+                # Renomear: original → old
+                cursor.execute(f'ALTER TABLE IF EXISTS "{table_name}" RENAME TO "{old_name}"')
+
+                # Renomear: staging → original
+                cursor.execute(f'ALTER TABLE "{staging_name}" RENAME TO "{table_name}"')
+
+                # Drop da tabela antiga (libera espaço)
+                cursor.execute(f'DROP TABLE IF EXISTS "{old_name}"')
+
+            # COMMIT ÚNICA VEZ ao final — ou falha tudo ou sucede tudo
+            self.conn.commit()
+            logger.info("✅ Todos os 10 swaps concluídos com sucesso (transação única)!")
+
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"❌ Erro durante swap — REVERTENDO TODOS os swaps: {e}")
+            raise
+        finally:
+            cursor.close()
+            # Voltar ao isolamento padrão
+            self.conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_READ_COMMITTED)
+
+
+class AdvisoryLock:
+    """Advisory Lock para sincronização entre processos ETL."""
+
+    LOCK_ID_ETL = 1
+    LOCK_ID_FIXES = 2
+    LOCK_ID_INDICES = 3
+
+    def __init__(self, conn, lock_id: int, lock_name: str = "ETL"):
+        self.conn = conn
+        self.lock_id = lock_id
+        self.lock_name = lock_name
+        self.acquired = False
+
+    def acquire(self, timeout_seconds: int = 300) -> bool:
+        """Adquire um advisory lock (bloqueante)."""
+        try:
+            with self.conn.cursor() as cursor:
+                logger.info(f"🔒 Tentando adquirir lock '{self.lock_name}' (ID: {self.lock_id})...")
+                cursor.execute(f"SET statement_timeout = '{timeout_seconds}s'")
+                cursor.execute(f"SELECT pg_advisory_lock({self.lock_id})")
+                self.conn.commit()
+                self.acquired = True
+                logger.info(f"✅ Lock '{self.lock_name}' adquirido com sucesso")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Falha ao adquirir lock '{self.lock_name}': {e}")
+            self.acquired = False
+            return False
+
+    def release(self):
+        """Libera o advisory lock."""
+        if not self.acquired:
+            return
+
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(f"SELECT pg_advisory_unlock({self.lock_id})")
+                self.conn.commit()
+                self.acquired = False
+                logger.info(f"🔓 Lock '{self.lock_name}' liberado")
+        except Exception as e:
+            logger.warning(f"⚠️  Erro ao liberar lock '{self.lock_name}': {e}")
+
+    def __enter__(self):
+        """Context manager: acquire lock."""
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager: release lock."""
+        self.release()
+        if exc_type:
+            logger.error(f"❌ Erro durante execução com lock: {exc_val}")

@@ -165,24 +165,26 @@ deactivate
 # Bonus Docker!
 # ==================================
 
-# 1. Construa a imagem (via cmd entre na pasta do seu projeto)
-docker compose build --no-cache
+# Verifique se está rodando - Deve mostrar status "Up"
+docker ps
 
 # caso precise limpar orfãs, remova a imagem
 docker compose down --remove-orphans
 
-# Suba o container (no caso do ETL ele ja inicia automaticamente)
-- recomendado, pois inicia, executa, Remove container ao final (sem utilizar recursos desnecessários)
-docker compose run --rm etl &
+# pull para atualizar o projeto
+git pull
+
+# 1. Construa a imagem (via cmd entre na pasta do seu projeto)
+docker compose build --no-cache
+
+# suba a API
+docker compose up -d api
 
 # Forçar atualização completa e Executar em background
 docker compose run -d etl --force
 
 - menos ideal mas funciona sem forçar atualização completa
-docker compose up -d
-
-# Verifique se está rodando - Deve mostrar status "Up"
-docker ps
+docker compose up -d etl
 
 # acompanhe os logs:
 - logs do container:

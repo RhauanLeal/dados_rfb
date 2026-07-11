@@ -27,7 +27,7 @@ import psutil
 import time
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from db_lock_manager import LockManager, configure_connection_timeouts
+from db_lock_manager import LockManager, configure_connection_timeouts, AdvisoryLock, StagingManager
 from email_notifier import enviar_email_erro, enviar_email_sucesso, decorador_com_notificacao, enviar_email_erro_com_locks
 import traceback
 
@@ -1058,25 +1058,37 @@ def download_file(url, output_path, tqdm_position=0, max_retries=4):
                 return None
 
 
-def apply_fixes(processar_simples=True):
+def truncate_staging_table(cur, table_name: str) -> None:
+    """Trunca tabela de staging (rápido, não afeta leitores)."""
+    staging_name = f"{table_name}_staging"
+    cur.execute(f'TRUNCATE TABLE "{staging_name}"')
+
+
+def apply_fixes(conn, processar_simples=True, table_suffix=""):
     """
     Aplica correções estáticas na base de dados.
+
+    Args:
+        conn: Conexão PostgreSQL (pode ser staging ou production)
+        processar_simples: Se True, limpa CNPJs problemáticos
+        table_suffix: Sufixo da tabela (ex: "_staging" para operar em staging, "" para tabelas reais)
     """
-    # É recomendável rodar isso ANTES de criar os índices para ser mais rápido
-    conn, engine = connect_db()
-    cur = conn.cursor()
+    cur = None
 
     try:
+        cur = conn.cursor()
+
         # Timeout específico para apply_fixes (30min + 10% = 33min = 1980s)
         cur.execute("SET statement_timeout = '1980s'")
-        logger.info("APLICANDO CORREÇÕES NA BASE DE DADOS...")
+        suffix_desc = f" em tabelas {table_suffix}" if table_suffix else ""
+        logger.info(f"APLICANDO CORREÇÕES NA BASE DE DADOS{suffix_desc}...")
 
         # Inserções simples (Tabelas auxiliares são pequenas, aqui é instantâneo)
         # Corrigindo Países
         logger.info("Inserindo correções em pais...")
-        cur.execute("""
-            INSERT INTO public.pais (codigo, descricao) 
-            VALUES 
+        cur.execute(f"""
+            INSERT INTO public.pais{table_suffix} (codigo, descricao)
+            VALUES
                 (008, 'ABU DHABI'),
                 (009, 'DIRCE'),
                 (015, 'ALAND, ILHAS'),
@@ -1132,9 +1144,9 @@ def apply_fixes(processar_simples=True):
         if processar_simples:
             logger.info("Limpando registros problemáticos da tabela Simples...")
             # Aqui usamos DELETE normal. Como não tem PK, ele funciona sem erros.
-            cur.execute("""
-                DELETE FROM public.simples 
-                WHERE cnpj_basico IN ('24417449', '24539162', '30721933', '30728066', 
+            cur.execute(f"""
+                DELETE FROM public.simples{table_suffix}
+                WHERE cnpj_basico IN ('24417449', '24539162', '30721933', '30728066',
                                     '30760363', '30847991', '30857441', '30886793', '30972017');
             """)
 
@@ -1142,15 +1154,13 @@ def apply_fixes(processar_simples=True):
         logger.info("CORREÇÕES APLICADAS COM SUCESSO.")
 
     except Exception as e:
-        conn.rollback() # Reverte se der erro para não corromper
+        conn.rollback()
         logger.error(f"ERRO AO APLICAR CORREÇÕES: {e}")
-        logger.info("ETL Finalizado.")
         raise
-    
+
     finally:
-        cur.close()
-        conn.close()
-        engine.dispose() # Libera recursos da engine
+        if cur:
+            cur.close()
         gc.collect()
 
 
@@ -1173,10 +1183,17 @@ def criar_indices(update=False):
     logger.info("Iniciando processo de indexação e otimização de estatísticas...")
     conn = None
     cur = None
+    advisory_lock = None
     try:
         # Importante: autocommit=True é obrigatório para CONCURRENTLY
         conn, _ = connect_db(autocommit=True)
         cur = conn.cursor()
+
+        # Adquirir lock para criar_indices
+        advisory_lock = AdvisoryLock(conn, AdvisoryLock.LOCK_ID_INDICES, "criar_indices")
+        if not advisory_lock.acquire(timeout_seconds=30):
+            logger.error("❌ Não foi possível adquirir lock para criar_indices. Outro processo pode estar rodando.")
+            return
 
         logger.info("Aumentando memória de manutenção para otimização...")
         cur.execute("SET maintenance_work_mem = '2GB';")
@@ -1302,6 +1319,8 @@ def criar_indices(update=False):
         logger.error(f"Erro geral ao criar índices: {e}", exc_info=True)
         sys.exit(1)
     finally:
+        if advisory_lock:
+            advisory_lock.release()
         if cur:
             cur.close()
         if conn:
@@ -1386,7 +1405,17 @@ def remove_duplicates_by_key(df: pd.DataFrame, key_column: str) -> pd.DataFrame:
 # Função principal do ETL
 @decorador_com_notificacao
 def etl_process(processar_simples=True, force_update=False):
+    conn_lock = None
+    advisory_lock = None
     try:
+        # Adquirir lock exclusivo para ETL
+        conn_lock, _ = connect_db()
+        advisory_lock = AdvisoryLock(conn_lock, AdvisoryLock.LOCK_ID_ETL, "ETL")
+
+        if not advisory_lock.acquire(timeout_seconds=30):
+            logger.error("❌ Não foi possível adquirir lock para ETL. Outro processo pode estar rodando.")
+            return
+
         # Criar os diretórios caso não existam
         OUTPUT_FILES_PATH.mkdir(parents=True, exist_ok=True)
         ERRO_FILES_PATH.mkdir(parents=True, exist_ok=True)
@@ -1399,8 +1428,16 @@ def etl_process(processar_simples=True, force_update=False):
         if not info:
             logger.info("Nenhuma atualização nova encontrada. Encerrando.")
             return
-        
+
         logger.info(f"Nova atualização encontrada: {info['ano']}-{info['mes']:02d} em {info['data_atualizacao']}")
+
+        # Abrir conexão para staging ANTES de preparar
+        conn, engine = connect_db()
+
+        # Preparar tabelas de staging (não afeta leituras dos usuários)
+        logger.info("Preparando tabelas de staging...")
+        staging_mgr = StagingManager(conn)
+        staging_mgr.prepare_staging()
 
         lista_zips = info['lista_zips']
 
@@ -1496,8 +1533,7 @@ def etl_process(processar_simples=True, force_update=False):
         # Criar tabelas antes de inserir dados
         create_tables()
 
-        # Reabre conexão para próximo bloco
-        conn, engine = connect_db()
+        # Reutilizar conexão já aberta
         cur = conn.cursor()
 
         # Começa arquivos_empresa
@@ -1509,33 +1545,13 @@ def etl_process(processar_simples=True, force_update=False):
         except Exception:
             pass
 
-        # Limpa a tabela antes do insert
-        logger.info("Limpando dados da tabela empresa (mantendo estrutura)...")
+        # Limpa a staging table antes do insert (não afeta leitores)
+        logger.info("Limpando dados da tabela empresa_staging (não afeta leituras)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('empresa')
+            truncate_staging_table(cur, 'empresa')
+            conn.commit()
         except Exception as e:
-            logger.error(f"Falha ao limpar empresa: {e}")
-            # Diagnosticar locks e enviar e-mail com instruções
-            resultado_locks = lock_mgr.diagnose_locks('empresa')
-
-            if resultado_locks.get('pids'):
-                # Há locks! Enviar e-mail com instruções para matá-los
-                enviar_email_erro_com_locks(
-                    titulo="Erro ao TRUNCATE - Tabela Empresa Bloqueada",
-                    mensagem=f"Falha ao limpar empresa: {str(e)}",
-                    table_name='empresa',
-                    pids=resultado_locks['pids'],
-                    sessoes=resultado_locks['sessoes'],
-                    rastreamento=traceback.format_exc()
-                )
-            else:
-                # Sem locks específicos, enviar e-mail de erro geral
-                enviar_email_erro(
-                    titulo="Erro ao TRUNCATE na Tabela Empresa",
-                    mensagem=f"Falha ao limpar empresa: {str(e)}",
-                    rastreamento=traceback.format_exc()
-                )
+            logger.error(f"Falha ao limpar empresa_staging: {e}")
             raise
  
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -1577,7 +1593,7 @@ def etl_process(processar_simples=True, force_update=False):
                             try:
                                 # Gravar dados no banco usando COPY (Alta performance para HDD)
                                 chunk.to_sql(
-                                    name='empresa',
+                                    name='empresa_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -1621,11 +1637,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela estabelecimento (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('estabelecimento')
+            truncate_staging_table(cur, 'estabelecimento')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar estabelecimento: {e}")
-            lock_mgr.diagnose_locks('estabelecimento')
             # Enviar notificação de erro
             enviar_email_erro(
                 titulo="Erro ao TRUNCATE na Tabela Estabelecimento",
@@ -1681,7 +1696,7 @@ def etl_process(processar_simples=True, force_update=False):
                             try:
                                 # Gravar dados no banco usando COPY (Alta performance para HDD)
                                 chunk.to_sql(
-                                    name='estabelecimento',
+                                    name='estabelecimento_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -1724,11 +1739,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela socios (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('socios')
+            truncate_staging_table(cur, 'socios')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar socios: {e}")
-            lock_mgr.diagnose_locks('socios')
             raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -1778,7 +1792,7 @@ def etl_process(processar_simples=True, force_update=False):
                             # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
-                                    name='socios',
+                                    name='socios_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -1821,11 +1835,10 @@ def etl_process(processar_simples=True, force_update=False):
             # Limpa a tabela antes do insert
             logger.info("Limpando dados da tabela simples (mantendo estrutura)...")
             try:
-                lock_mgr = LockManager(conn, timeout_seconds=30)
-                lock_mgr.truncate_with_timeout('simples')
+                truncate_staging_table(cur, 'simples')
+                conn.commit()
             except Exception as e:
                 logger.error(f"Falha ao limpar simples: {e}")
-                lock_mgr.diagnose_locks('simples')
                 raise
 
             # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -1878,7 +1891,7 @@ def etl_process(processar_simples=True, force_update=False):
                                 # Gravar dados no banco usando COPY (Alta performance para HDD)
                                 try:
                                     chunk.to_sql(
-                                        name='simples',
+                                        name='simples_staging',
                                         con=engine,
                                         if_exists='append',
                                         index=False,
@@ -1921,11 +1934,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela cnae (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('cnae')
+            truncate_staging_table(cur, 'cnae')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar cnae: {e}")
-            lock_mgr.diagnose_locks('cnae')
             raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -1957,7 +1969,7 @@ def etl_process(processar_simples=True, force_update=False):
                             # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
-                                    name='cnae',
+                                    name='cnae_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -2000,11 +2012,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela estabelecimento_motivo (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('estabelecimento_motivo')
+            truncate_staging_table(cur, 'estabelecimento_motivo')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar estabelecimento_motivo: {e}")
-            lock_mgr.diagnose_locks('estabelecimento_motivo')
             raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -2036,7 +2047,7 @@ def etl_process(processar_simples=True, force_update=False):
                             # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
-                                    name='estabelecimento_motivo',
+                                    name='estabelecimento_motivo_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -2079,11 +2090,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela munic (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('munic')
+            truncate_staging_table(cur, 'munic')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar munic: {e}")
-            lock_mgr.diagnose_locks('munic')
             raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -2115,7 +2125,7 @@ def etl_process(processar_simples=True, force_update=False):
                             # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
-                                    name='munic',
+                                    name='munic_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -2159,11 +2169,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela empresa_natureza_juridica (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('empresa_natureza_juridica')
+            truncate_staging_table(cur, 'empresa_natureza_juridica')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar empresa_natureza_juridica: {e}")
-            lock_mgr.diagnose_locks('empresa_natureza_juridica')
             raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -2195,7 +2204,7 @@ def etl_process(processar_simples=True, force_update=False):
                             # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
-                                    name='empresa_natureza_juridica',
+                                    name='empresa_natureza_juridica_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -2239,11 +2248,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela pais (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('pais')
+            truncate_staging_table(cur, 'pais')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar pais: {e}")
-            lock_mgr.diagnose_locks('pais')
             raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -2275,7 +2283,7 @@ def etl_process(processar_simples=True, force_update=False):
                             # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
-                                    name='pais',
+                                    name='pais_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -2320,11 +2328,10 @@ def etl_process(processar_simples=True, force_update=False):
         # Limpa a tabela antes do insert
         logger.info("Limpando dados da tabela socios_qualificacao (mantendo estrutura)...")
         try:
-            lock_mgr = LockManager(conn, timeout_seconds=30)
-            lock_mgr.truncate_with_timeout('socios_qualificacao')
+            truncate_staging_table(cur, 'socios_qualificacao')
+            conn.commit()
         except Exception as e:
             logger.error(f"Falha ao limpar socios_qualificacao: {e}")
-            lock_mgr.diagnose_locks('socios_qualificacao')
             raise
 
         # Processa cada arquivo (agora é tupla: nome_arquivo, zip_path)
@@ -2356,7 +2363,7 @@ def etl_process(processar_simples=True, force_update=False):
                             # Gravar dados no banco usando COPY (Alta performance para HDD)
                             try:
                                 chunk.to_sql(
-                                    name='socios_qualificacao',
+                                    name='socios_qualificacao_staging',
                                     con=engine,
                                     if_exists='append',
                                     index=False,
@@ -2408,10 +2415,23 @@ def etl_process(processar_simples=True, force_update=False):
         # Processo de inserção finalizado
         logger.info('Processo de carga dos arquivos finalizado!')
 
-        # Aplica correções nas tabelas
-        apply_fixes(processar_simples=processar_simples)
+        # ===== VALIDAÇÃO E PREPARAÇÃO (enquanto dados ainda em staging) =====
+        logger.info("🔍 Validando integridade dos dados antes do swap...")
+        if not staging_mgr.validate_before_swap():
+            logger.error("❌ Validação falhou! Dados podem estar incompletos. Abortando swap.")
+            raise ValueError("Falha na validação pré-swap: dados incompletos ou inconsistentes")
 
-        # Criação dos índices
+        # Aplica correções em staging (seguro, isolado de usuários)
+        logger.info("🔧 Aplicando correções nos dados de staging...")
+        apply_fixes(conn, processar_simples=processar_simples, table_suffix="_staging")
+
+        # ===== SWAP ATÔMICO (bloqueio mínimo, < 1s) =====
+        logger.info("⚡ Fazendo swap das tabelas (bloqueio mínimo)...")
+        staging_mgr.swap_all_tables()
+        logger.info("✅ Todos os dados estão disponíveis para consulta!")
+
+        # Criação dos índices (após swap, nas tabelas originais)
+        logger.info("📊 Criando índices para otimização de performance...")
         criar_indices(info['update'])
 
         # Remover arquivos após a inserção no banco
@@ -2439,16 +2459,28 @@ def etl_process(processar_simples=True, force_update=False):
             detalhes=f"Tempo até falha: {converter_segundos(start_time, datetime.now())}",
             rastreamento=traceback.format_exc()
         )
-
-        # Encerramento seguro de recursos
-        try:
-            cur.close()
-            conn.close()
-            engine.dispose()
-            gc.collect()
-        except:
-            pass
         sys.exit(1)
+
+    finally:
+        # Sempre liberar o lock, mesmo se houver erro
+        if advisory_lock:
+            advisory_lock.release()
+        if conn_lock:
+            try:
+                conn_lock.close()
+            except:
+                pass
+        # Fechar conexão de trabalho se ainda estiver aberta
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+        if engine:
+            try:
+                engine.dispose()
+            except:
+                pass
 
 
 if __name__ == "__main__":
