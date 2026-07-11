@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class LockManager:
     """Gerenciador de locks PostgreSQL para operações críticas (TRUNCATE, etc)."""
 
-    def __init__(self, conn, timeout_seconds=30):
+    def __init__(self, conn, timeout_seconds=3600):
         self.conn = conn
         self.timeout_seconds = timeout_seconds
 
@@ -202,15 +202,15 @@ def configure_connection_timeouts(conn):
             logger.debug(f"Nenhuma transação anterior para limpar: {e}")
 
         with conn.cursor() as cursor:
-            # Timeout geral para statements (30 segundos)
-            cursor.execute("SET statement_timeout = '30s'")
+            # Timeout geral para statements (1 hora)
+            cursor.execute("SET statement_timeout = '3600s'")
 
             # Timeout para lock (5 segundos)
             cursor.execute("SET lock_timeout = '5s'")
 
             conn.commit()
 
-        logger.info("✓ Timeouts configurados: statement=30s, lock=5s")
+        logger.info("✓ Timeouts configurados: statement=3600s (1h), lock=5s")
     except Exception as e:
         logger.warning(f"⚠️  Erro ao configurar timeouts: {e}")
         try:
