@@ -863,6 +863,7 @@ def buscar_estabelecimento(
         cur.execute(f"""
             SELECT COUNT(*)
             FROM estabelecimento est
+            LEFT JOIN empresa e ON est.cnpj_basico = e.cnpj_basico
             WHERE {where_sql}
         """, params)
 
