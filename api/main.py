@@ -156,9 +156,9 @@ def help_endpoints():
                     "requer_auth": True,
                     "parametros": {
                         "obrigatorios": ["uf", "municipio"],
-                        "opcionais": ["cnpj_basico", "razao_nome", "situacao_cadastral", "motivo_situacao_cadastral", "data_inicio_atividade", "cnae_fiscal_principal", "cnae_fiscal_secundaria", "page", "limit"]
+                        "opcionais": ["cnpj_basico", "razao_nome", "natureza_juridica", "porte_empresa", "situacao_cadastral", "motivo_situacao_cadastral", "data_inicio_atividade", "cnae_fiscal_principal", "cnae_fiscal_secundaria", "page", "limit"]
                     },
-                    "exemplo": "curl -H 'Authorization: Bearer TOKEN' 'http://localhost:8001/estabelecimentos/buscar?uf=SP&municipio=7121'"
+                    "exemplo": "curl -H 'Authorization: Bearer TOKEN' 'http://localhost:8001/estabelecimentos/buscar?uf=SP&municipio=7121&porte_empresa=1'"
                 },
                 {
                     "metodo": "GET",
@@ -167,7 +167,7 @@ def help_endpoints():
                     "requer_auth": True,
                     "parametros": {
                         "obrigatorios": ["uf", "municipio"],
-                        "opcionais": ["cnpj_basico", "razao_nome", "situacao_cadastral", "motivo_situacao_cadastral", "data_inicio_atividade", "cnae_fiscal_principal", "cnae_fiscal_secundaria", "max_records"]
+                        "opcionais": ["cnpj_basico", "razao_nome", "natureza_juridica", "porte_empresa", "situacao_cadastral", "motivo_situacao_cadastral", "data_inicio_atividade", "cnae_fiscal_principal", "cnae_fiscal_secundaria", "max_records"]
                     },
                     "exemplo": "curl -H 'Authorization: Bearer TOKEN' 'http://localhost:8001/estabelecimentos/exportar-csv?uf=SP&municipio=7121' -o estabelecimentos.csv"
                 }
@@ -746,6 +746,8 @@ def buscar_estabelecimento(
     municipio: int = Query(...),
     cnpj_basico: Optional[str] = Query(None),
     razao_nome: Optional[str] = Query(None),
+    natureza_juridica: Optional[int] = Query(None),
+    porte_empresa: Optional[int] = Query(None),
     situacao_cadastral: Optional[int] = Query(None),
     motivo_situacao_cadastral: Optional[int] = Query(None),
     data_inicio_atividade: Optional[str] = Query(None),
@@ -761,6 +763,8 @@ def buscar_estabelecimento(
 
     Parâmetros:
     - razao_nome: busca parcial em nome_fantasia (case-insensitive)
+    - natureza_juridica: código da natureza jurídica (da empresa)
+    - porte_empresa: código do porte da empresa
     - motivo_situacao_cadastral: código do motivo da situação cadastral
     - data_inicio_atividade: data exata (formato YYYY-MM-DD)
 
@@ -780,6 +784,12 @@ def buscar_estabelecimento(
         if razao_nome:
             where_clauses.append("est.nome_fantasia ILIKE %s")
             params.append(f"%{razao_nome}%")
+        if natureza_juridica is not None:
+            where_clauses.append("e.natureza_juridica = %s")
+            params.append(natureza_juridica)
+        if porte_empresa is not None:
+            where_clauses.append("e.porte_empresa = %s")
+            params.append(porte_empresa)
         if situacao_cadastral is not None:
             where_clauses.append("est.situacao_cadastral = %s")
             params.append(situacao_cadastral)
@@ -810,7 +820,9 @@ def buscar_estabelecimento(
                 est.municipio,
                 est.uf,
                 est.bairro,
-                e.razao_social
+                e.razao_social,
+                e.natureza_juridica,
+                e.porte_empresa
             FROM estabelecimento est
             LEFT JOIN empresa e ON est.cnpj_basico = e.cnpj_basico
             WHERE {where_sql}
@@ -840,7 +852,11 @@ def buscar_estabelecimento(
                 "municipio_desc": _get_lookup_desc("munic", row[7]),
                 "uf": row[8],
                 "bairro": row[9],
-                "razao_social": row[10]
+                "razao_social": row[10],
+                "natureza_juridica": _to_int(row[11]),
+                "natureza_juridica_desc": _get_lookup_desc("empresa_natureza_juridica", _to_int(row[11])),
+                "porte_empresa": _to_int(row[12]),
+                "porte_empresa_desc": _get_lookup_desc("empresa_porte", _to_int(row[12]))
             }
             estabelecimentos.append(estab)
 
@@ -1083,6 +1099,8 @@ def exportar_estabelecimentos_csv(
     municipio: int = Query(...),
     cnpj_basico: Optional[str] = Query(None),
     razao_nome: Optional[str] = Query(None),
+    natureza_juridica: Optional[int] = Query(None),
+    porte_empresa: Optional[int] = Query(None),
     situacao_cadastral: Optional[int] = Query(None),
     motivo_situacao_cadastral: Optional[int] = Query(None),
     data_inicio_atividade: Optional[str] = Query(None),
@@ -1104,47 +1122,57 @@ def exportar_estabelecimentos_csv(
     try:
         cur = conn.cursor()
 
-        where_clauses = ["uf = %s", "municipio = %s"]
+        where_clauses = ["est.uf = %s", "est.municipio = %s"]
         params = [uf, municipio]
 
         if cnpj_basico:
-            where_clauses.append("cnpj_basico = %s")
+            where_clauses.append("est.cnpj_basico = %s")
             params.append(cnpj_basico)
         if razao_nome:
-            where_clauses.append("nome_fantasia ILIKE %s")
+            where_clauses.append("est.nome_fantasia ILIKE %s")
             params.append(f"%{razao_nome}%")
+        if natureza_juridica is not None:
+            where_clauses.append("e.natureza_juridica = %s")
+            params.append(natureza_juridica)
+        if porte_empresa is not None:
+            where_clauses.append("e.porte_empresa = %s")
+            params.append(porte_empresa)
         if situacao_cadastral is not None:
-            where_clauses.append("situacao_cadastral = %s")
+            where_clauses.append("est.situacao_cadastral = %s")
             params.append(situacao_cadastral)
         if motivo_situacao_cadastral is not None:
-            where_clauses.append("motivo_situacao_cadastral = %s")
+            where_clauses.append("est.motivo_situacao_cadastral = %s")
             params.append(motivo_situacao_cadastral)
         if data_inicio_atividade:
-            where_clauses.append("data_inicio_atividade = %s")
+            where_clauses.append("est.data_inicio_atividade = %s")
             params.append(data_inicio_atividade)
         if cnae_fiscal_principal is not None:
-            where_clauses.append("cnae_fiscal_principal = %s")
+            where_clauses.append("est.cnae_fiscal_principal = %s")
             params.append(cnae_fiscal_principal)
         if cnae_fiscal_secundaria is not None:
-            where_clauses.append("cnae_fiscal_secundaria = %s")
+            where_clauses.append("est.cnae_fiscal_secundaria = %s")
             params.append(cnae_fiscal_secundaria)
 
         where_sql = " AND ".join(where_clauses)
 
         cur.execute(f"""
             SELECT
-                cnpj_basico,
-                cnpj_ordem,
-                cnpj_dv,
-                nome_fantasia,
-                situacao_cadastral,
-                data_inicio_atividade,
-                cnae_fiscal_principal,
-                municipio,
-                uf
-            FROM estabelecimento
+                est.cnpj_basico,
+                est.cnpj_ordem,
+                est.cnpj_dv,
+                est.nome_fantasia,
+                est.situacao_cadastral,
+                est.data_inicio_atividade,
+                est.cnae_fiscal_principal,
+                est.municipio,
+                est.uf,
+                e.razao_social,
+                e.natureza_juridica,
+                e.porte_empresa
+            FROM estabelecimento est
+            LEFT JOIN empresa e ON est.cnpj_basico = e.cnpj_basico
             WHERE {where_sql}
-            ORDER BY cnpj_basico, cnpj_ordem
+            ORDER BY est.cnpj_basico, est.cnpj_ordem
             LIMIT %s
         """, params + [max_records])
 
@@ -1153,8 +1181,9 @@ def exportar_estabelecimentos_csv(
         # Gerar CSV em memória
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["cnpj_basico", "cnpj_ordem", "cnpj_dv", "nome_fantasia", "situacao_cadastral",
-                        "data_inicio_atividade", "cnae_fiscal_principal", "municipio", "uf"])
+        writer.writerow(["cnpj_basico", "cnpj_ordem", "cnpj_dv", "nome_fantasia", "razao_social",
+                        "situacao_cadastral", "data_inicio_atividade", "cnae_fiscal_principal",
+                        "natureza_juridica", "porte_empresa", "municipio", "uf"])
 
         for row in rows:
             writer.writerow(row)
