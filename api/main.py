@@ -497,7 +497,8 @@ def get_socios(cnpj_basico: str, _: str = Depends(verify_token)):
             SELECT
                 cnpj_basico, identificador_socio, nome_socio_razao_social,
                 cpf_cnpj_socio, qualificacao_socio, data_entrada_sociedade,
-                pais, faixa_etaria
+                pais, faixa_etaria, representante_legal, nome_do_representante,
+                qualificacao_representante_legal
             FROM socios
             WHERE cnpj_basico = %s
             ORDER BY identificador_socio
@@ -519,12 +520,17 @@ def get_socios(cnpj_basico: str, _: str = Depends(verify_token)):
                 "data_entrada_sociedade": row[5],
                 "pais": _to_int(row[6]),
                 "faixa_etaria": _to_int(row[7]),
+                "representante_legal": row[8],
+                "nome_do_representante": row[9],
+                "qualificacao_representante_legal": _to_int(row[10]),
             }
             socio["identificador_socio_desc"] = _get_lookup_desc(
                 "socios_identificador", socio["identificador_socio"])
             socio["qualificacao_socio_desc"] = _get_lookup_desc(
                 "socios_qualificacao", socio["qualificacao_socio"])
             socio["pais_desc"] = _get_lookup_desc("pais", socio["pais"])
+            socio["qualificacao_representante_legal_desc"] = _get_lookup_desc(
+                "socios_qualificacao", socio["qualificacao_representante_legal"])
             socios_list.append(socio)
 
         cur.close()
@@ -901,7 +907,7 @@ def buscar_socios(
     - nome_socio_razao_social: busca parcial pelo nome (case-insensitive)
     - cpf_cnpj_socio: busca exata por CPF ou CNPJ
 
-    Retorna dados básicos de sócios.
+    Retorna dados básicos de sócios, incluindo informações de representante legal.
     """
     conn = get_connection()
     try:
@@ -929,6 +935,9 @@ def buscar_socios(
                 s.identificador_socio,
                 s.nome_socio_razao_social,
                 s.qualificacao_socio,
+                s.representante_legal,
+                s.nome_do_representante,
+                s.qualificacao_representante_legal,
                 est.municipio,
                 est.uf
             FROM socios s
@@ -952,9 +961,13 @@ def buscar_socios(
                 "nome_socio_razao_social": row[2],
                 "qualificacao_socio": row[3],
                 "qualificacao_socio_desc": _get_lookup_desc("socios_qualificacao", row[3]),
-                "municipio": row[4],
-                "municipio_desc": _get_lookup_desc("munic", row[4]),
-                "uf": row[5]
+                "representante_legal": row[4],
+                "nome_do_representante": row[5],
+                "qualificacao_representante_legal": _to_int(row[6]),
+                "qualificacao_representante_legal_desc": _get_lookup_desc("socios_qualificacao", _to_int(row[6])),
+                "municipio": row[7],
+                "municipio_desc": _get_lookup_desc("munic", row[7]),
+                "uf": row[8]
             }
             socios.append(socio)
 
@@ -1223,7 +1236,7 @@ def exportar_socios_csv(
     - uf, municipio: obrigatórios
     - max_records: limite máximo de registros (padrão: 100000, máx: 500000)
 
-    Retorna: arquivo CSV com todos os sócios correspondentes aos filtros
+    Retorna: arquivo CSV com todos os sócios correspondentes aos filtros, incluindo representante legal
     """
     conn = get_connection()
     try:
@@ -1250,6 +1263,9 @@ def exportar_socios_csv(
                 s.identificador_socio,
                 s.nome_socio_razao_social,
                 s.qualificacao_socio,
+                s.representante_legal,
+                s.nome_do_representante,
+                s.qualificacao_representante_legal,
                 est.municipio,
                 est.uf
             FROM socios s
@@ -1265,7 +1281,8 @@ def exportar_socios_csv(
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["cnpj_basico", "identificador_socio", "nome_socio_razao_social",
-                        "qualificacao_socio", "municipio", "uf"])
+                        "qualificacao_socio", "representante_legal", "nome_do_representante",
+                        "qualificacao_representante_legal", "municipio", "uf"])
 
         for row in rows:
             writer.writerow(row)
