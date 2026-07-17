@@ -278,29 +278,47 @@ class StagingManager:
                     raise
 
     def get_row_counts(self) -> dict:
-        """Retorna contagem de linhas em tabelas originais e staging (validação pré-swap)."""
+        """Retorna contagem estimada de linhas em tabelas originais e staging (validação pré-swap).
+
+        Usa pg_class.reltuples (estimativa do planner) em vez de COUNT(*) exato: em tabelas
+        com dezenas/centenas de milhões de linhas, COUNT(*) é um full scan que pode estourar
+        qualquer statement_timeout sob concorrência, e uma vez que uma statement falha dentro
+        da transação, todas as seguintes falham com "current transaction is aborted" até um
+        ROLLBACK. A validação aqui só precisa de uma ordem de grandeza (staging >= 50% do
+        original), não de um valor exato.
+        """
         counts = {}
         with self.conn.cursor() as cursor:
-            # Aumentar timeout para COUNT(*) em tabelas grandes
-            cursor.execute("SET statement_timeout = '300s'")
-
             for table_name in self.STAGING_TABLES:
                 staging_name = f"{table_name}_staging"
                 try:
-                    cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
-                    original_count = cursor.fetchone()[0]
-                    cursor.execute(f'SELECT COUNT(*) FROM "{staging_name}"')
-                    staging_count = cursor.fetchone()[0]
+                    cursor.execute(
+                        "SELECT reltuples::bigint FROM pg_class WHERE relname = %s",
+                        (table_name,)
+                    )
+                    row = cursor.fetchone()
+                    original_count = row[0] if row and row[0] is not None else 0
+
+                    # Staging acabou de ser carregada e ainda não foi ANALYZEd (isso só
+                    # acontece depois do swap, em criar_indices()) — sem isso, reltuples
+                    # ficaria zerado/desatualizado. ANALYZE é uma amostragem rápida, não
+                    # um full scan como COUNT(*).
+                    cursor.execute(f'ANALYZE "{staging_name}"')
+                    cursor.execute(
+                        "SELECT reltuples::bigint FROM pg_class WHERE relname = %s",
+                        (staging_name,)
+                    )
+                    row = cursor.fetchone()
+                    staging_count = row[0] if row and row[0] is not None else 0
+
                     counts[table_name] = {
                         'original': original_count,
                         'staging': staging_count
                     }
                 except Exception as e:
                     logger.warning(f"Erro ao contar linhas em {table_name}: {e}")
+                    self.conn.rollback()
                     counts[table_name] = {'original': 0, 'staging': 0}
-
-            # Restaurar timeout padrão
-            cursor.execute("SET statement_timeout = '30s'")
 
         return counts
 
