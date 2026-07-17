@@ -96,19 +96,57 @@ if not dotenv_path:
 load_dotenv(dotenv_path)
 
 
+def _parse_memory_limit_gb(valor: str | None) -> float | None:
+    """
+    Converte MEMORY_LIMIT (ex.: '6G', '512M', '8192') em GB (float).
+    Retorna None se nao definido/invalido.
+    """
+    if not valor:
+        return None
+    valor = valor.strip().upper()
+    match = re.match(r"^\s*(\d+(?:[.,]\d+)?)\s*([GMK]?)B?\s*$", valor)
+    if not match:
+        return None
+    numero = float(match.group(1).replace(",", "."))
+    unidade = match.group(2)
+    fator = {"G": 1.0, "M": 1 / 1024, "K": 1 / (1024**2), "": 1 / (1024**3)}[unidade]
+    return numero * fator
+
+
 def calcular_chunks_automatico():
-    """Calcula chunks ideais baseado na RAM disponível"""
-     
+    """
+    Calcula chunks ideais baseado na RAM disponivel.
+
+    IMPORTANTE: dentro de um container, psutil enxerga a RAM do HOST, nao o
+    `mem_limit`. Por isso respeitamos MEMORY_LIMIT (passado pelo compose) como
+    teto real do processo. O orcamento efetivo e o MENOR entre o disponivel no
+    host e o limite do container, para nao estourar o container (OOMKilled).
+    """
     mem = psutil.virtual_memory()
     ram_gb = mem.total / (1024**3)
     available_gb = mem.available / (1024**3)
-    
-    logger.info(f"RAM total: {ram_gb:.1f}GB, Disponível: {available_gb:.1f}GB")
-    
-    if available_gb > 4:
+
+    limite_container_gb = _parse_memory_limit_gb(os.getenv("MEMORY_LIMIT"))
+
+    # Orcamento efetivo: nunca acima do teto do container.
+    orcamento_gb = available_gb
+    if limite_container_gb is not None:
+        orcamento_gb = min(available_gb, limite_container_gb)
+
+    logger.info(
+        f"RAM total: {ram_gb:.1f}GB, Disponível (host): {available_gb:.1f}GB, "
+        f"Limite container: {limite_container_gb if limite_container_gb else 'n/d'}GB, "
+        f"Orçamento efetivo: {orcamento_gb:.1f}GB"
+    )
+
+    # Mapeamento conservador: o callback COPY (psql_insert_copy) duplica o chunk
+    # em memoria como texto (StringIO), entao mantemos folga em relacao ao teto.
+    if orcamento_gb >= 12:
         return 2_000_000, 100_000
-    else:
+    elif orcamento_gb >= 6:
         return 1_000_000, 50_000
+    else:
+        return 500_000, 25_000
 
 CHUNK_ROWS, CHUNK_TO_SQL = calcular_chunks_automatico()
 logger.info(f"Usando CHUNK_ROWS={CHUNK_ROWS:,}, CHUNK_TO_SQL={CHUNK_TO_SQL:,}")

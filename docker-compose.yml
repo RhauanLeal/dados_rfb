@@ -12,10 +12,14 @@ services:
       - ../dados_rfb_env/.env
     environment:
       - TZ=America/Boa_Vista
-      - MEMORY_LIMIT=8G  # Informa ao script Python
+      - MEMORY_LIMIT=6G  # Lido pelo etl_rfb2.py p/ dimensionar os chunks (respeitar mem_limit)
     restart: no
-    # === LIMITES DE MEMÓRIA ===
-    mem_limit: 8g            # Máximo 8GB (50% da VM)
+    # === LIMITES DE RECURSOS ===
+    # Servidor COMPARTILHADO (Xeon E5-2609 v2, 4c/4t, 32GB, HDD) com o Postgres
+    # do snfisc, o snfisc e o MinIO. O ETL roda 1x/mes, entao os tetos protegem
+    # a producao durante a janela de carga.
+    cpus: 1.5                # transform em pandas e single-thread (GIL); 1.5 sobra
+    mem_limit: 6g            # margem real dentro do orcamento de RAM da maquina
     mem_reservation: 4g      # Reserva mínima 4GB
     # === OTIMIZAÇÕES DOCKER ===
     shm_size: '1gb'                   # Suficiente para pandas
