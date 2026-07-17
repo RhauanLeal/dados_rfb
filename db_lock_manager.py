@@ -289,6 +289,11 @@ class StagingManager:
         """
         counts = {}
         with self.conn.cursor() as cursor:
+            # ANALYZE em tabelas com dezenas/centenas de milhões de linhas pode passar
+            # do statement_timeout padrão de 30s (configure_connection_timeouts) — usa
+            # um timeout maior aqui, igual apply_fixes/criar_indices fazem para operações
+            # longas na mesma conexão.
+            cursor.execute("SET statement_timeout = '600s'")
             for table_name in self.STAGING_TABLES:
                 staging_name = f"{table_name}_staging"
                 try:
@@ -317,8 +322,13 @@ class StagingManager:
                     }
                 except Exception as e:
                     logger.warning(f"Erro ao contar linhas em {table_name}: {e}")
+                    # ROLLBACK também desfaz o SET statement_timeout desta transação
+                    # (não é SET LOCAL) — reaplica para as próximas tabelas do loop.
                     self.conn.rollback()
+                    cursor.execute("SET statement_timeout = '600s'")
                     counts[table_name] = {'original': 0, 'staging': 0}
+
+            cursor.execute("SET statement_timeout = '30s'")
 
         return counts
 
