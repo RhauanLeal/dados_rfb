@@ -11,7 +11,12 @@ import sys
 from datetime import datetime
 from api.db import get_connection, return_connection, close_all_connections
 from api.auth import create_token, verify_token
-from api.atualizacao import verificar_nova_atualizacao
+from api.atualizacao import (
+    verificar_nova_atualizacao,
+    verificar_atualizacao_local,
+    registrar_versao_disponivel,
+    garantir_tabela_versao_disponivel,
+)
 from typing import Optional
 
 app = FastAPI(title="dados_rfb API", version="1.0.0")
@@ -37,6 +42,13 @@ class AtualizacaoResponse(BaseModel):
     versao_disponivel: Optional[str] = None
     versao_atual: Optional[str] = None
     data_ultima_atualizacao: Optional[str] = None
+
+
+class VersaoDisponivelRequest(BaseModel):
+    ano: int
+    mes: int
+    origem: str = "manual"
+    observacao: Optional[str] = None
 
 
 CACHE_TTL = 3600  # 1 hora
@@ -293,6 +305,26 @@ def help_endpoints():
                     "requer_auth": True,
                     "observacao": "Pode demorar várias horas - executa em background",
                     "exemplo": "curl -X POST -H 'Authorization: Bearer TOKEN' 'http://localhost:8001/atualizar/iniciar'"
+                },
+                {
+                    "metodo": "GET",
+                    "rota": "/atualizar/verificar-local",
+                    "descricao": "Verificar se há nova versão pendente usando somente dados locais (sem acessar o site da RFB)",
+                    "requer_auth": True,
+                    "observacao": "Rápido - compara info_dados com rfb_versao_disponivel. Ideal para outros sistemas consultarem com frequência.",
+                    "exemplo": "curl -H 'Authorization: Bearer TOKEN' 'http://localhost:8001/atualizar/verificar-local'"
+                },
+                {
+                    "metodo": "POST",
+                    "rota": "/atualizar/versao-disponivel",
+                    "descricao": "Registrar manualmente a versão mais recente conhecida como disponível no site da RFB",
+                    "requer_auth": True,
+                    "parametros": {
+                        "obrigatorios": ["ano", "mes"],
+                        "opcionais": ["origem", "observacao"]
+                    },
+                    "observacao": "Popula a tabela usada por /atualizar/verificar-local. Upsert por ano/mes.",
+                    "exemplo": "curl -X POST -H 'Authorization: Bearer TOKEN' -H 'Content-Type: application/json' -d '{\"ano\":2026,\"mes\":6}' 'http://localhost:8001/atualizar/versao-disponivel'"
                 }
             ]
         },
@@ -1348,6 +1380,74 @@ def verificar_atualizacao(_: str = Depends(verify_token)):
         )
 
 
+@app.post("/atualizar/versao-disponivel")
+def popular_versao_disponivel(request: VersaoDisponivelRequest, _: str = Depends(verify_token)):
+    """
+    Registra manualmente a versão mais recente conhecida como disponível no site da RFB.
+
+    Use este endpoint para popular a checagem local rápida (GET /atualizar/verificar-local)
+    sem que ela precise sair para a internet a cada consulta. Você mesmo decide quando
+    checar o site da RFB (manualmente ou via /atualizar/verificar) e grava o resultado aqui.
+
+    Corpo (JSON):
+    - ano, mes: versão detectada como disponível
+    - origem: identifica quem populou (padrão: "manual")
+    - observacao: texto livre opcional
+
+    Chamadas repetidas com o mesmo ano/mes apenas atualizam data_verificacao (upsert).
+    """
+    if not (1 <= request.mes <= 12):
+        raise HTTPException(status_code=400, detail="mes deve estar entre 1 e 12")
+
+    try:
+        resultado = registrar_versao_disponivel(
+            request.ano, request.mes, request.origem, request.observacao)
+        return {
+            "status": "ok",
+            "mensagem": f"Versão disponível registrada: {resultado['mes']:02d}/{resultado['ano']}",
+            "ano": resultado["ano"],
+            "mes": resultado["mes"],
+            "data_verificacao": str(resultado["data_verificacao"]),
+            "origem": resultado["origem"],
+            "observacao": resultado["observacao"],
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/atualizar/verificar-local")
+def verificar_atualizacao_local_endpoint(_: str = Depends(verify_token)):
+    """
+    Verifica se há nova versão pendente usando SOMENTE dados locais do banco.
+
+    Compara info_dados (versão atualmente carregada) com rfb_versao_disponivel
+    (última versão conhecida como disponível, populada via POST /atualizar/versao-disponivel).
+    Não faz nenhuma requisição ao site da RFB — ideal para outros sistemas consultarem
+    com frequência sem o custo/latência do scraping online.
+
+    Resposta: mesmo formato de /atualizar/verificar, mais versao_disponivel_conhecida
+    e data_verificacao_disponivel.
+    """
+    try:
+        result = verificar_atualizacao_local()
+        return {
+            "msg": result.get("msg", ""),
+            "atualizado": not result.get("update", False),
+            "nova_versao_disponivel": result.get("update", False),
+            "ano": result.get("ano"),
+            "mes": result.get("mes"),
+            "versao_atual": result.get("versao_atual"),
+            "data_ultima_atualizacao": result.get("data_ultima_atualizacao"),
+            "versao_disponivel_conhecida": result.get("versao_disponivel_conhecida"),
+            "data_verificacao_disponivel": result.get("data_verificacao_disponivel"),
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao verificar atualização local: {str(e)}"
+        )
+
+
 def _executar_etl_background():
     """
     Executa o ETL em background
@@ -1620,6 +1720,11 @@ def get_motivo_situacao_por_codigo(codigo: int, _: str = Depends(verify_token)):
         raise HTTPException(status_code=404, detail="Motivo não encontrado")
     finally:
         return_connection(conn)
+
+
+@app.on_event("startup")
+def startup_event():
+    garantir_tabela_versao_disponivel()
 
 
 @app.on_event("shutdown")

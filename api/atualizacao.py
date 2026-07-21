@@ -12,6 +12,154 @@ from bs4 import BeautifulSoup
 from api.db import get_connection, return_connection
 
 
+def garantir_tabela_versao_disponivel():
+    """
+    Cria a tabela rfb_versao_disponivel se ainda não existir.
+    Guarda a última versão conhecida como disponível no site da RFB,
+    populada manualmente (ou por script próprio) via API, sem depender do ETL.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rfb_versao_disponivel (
+                id SERIAL PRIMARY KEY,
+                ano INTEGER NOT NULL,
+                mes INTEGER NOT NULL,
+                data_verificacao TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                origem VARCHAR(20) NOT NULL DEFAULT 'manual',
+                observacao TEXT,
+                UNIQUE (ano, mes)
+            );
+        """)
+        conn.commit()
+        cur.close()
+    finally:
+        return_connection(conn)
+
+
+def obter_versao_disponivel_db():
+    """
+    Retorna o registro mais recente da tabela rfb_versao_disponivel, ou None
+    se a tabela estiver vazia (ou não existir ainda).
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ano, mes, data_verificacao, origem, observacao
+            FROM rfb_versao_disponivel
+            ORDER BY ano DESC, mes DESC
+            LIMIT 1
+        """)
+        resultado = cur.fetchone()
+        cur.close()
+
+        if resultado:
+            ano, mes, data_verificacao, origem, observacao = resultado
+            return {
+                'ano': ano,
+                'mes': mes,
+                'data_verificacao': data_verificacao,
+                'origem': origem,
+                'observacao': observacao,
+            }
+        return None
+    except Exception:
+        return None
+    finally:
+        return_connection(conn)
+
+
+def registrar_versao_disponivel(ano: int, mes: int, origem: str = "manual", observacao: str = None):
+    """
+    Insere ou atualiza (upsert por ano/mes) o registro da versão mais recente
+    conhecida como disponível no site da RFB.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO rfb_versao_disponivel (ano, mes, data_verificacao, origem, observacao)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, %s, %s)
+            ON CONFLICT (ano, mes)
+            DO UPDATE SET data_verificacao = CURRENT_TIMESTAMP,
+                          origem = EXCLUDED.origem,
+                          observacao = EXCLUDED.observacao
+            RETURNING ano, mes, data_verificacao, origem, observacao
+        """, (ano, mes, origem, observacao))
+        resultado = cur.fetchone()
+        conn.commit()
+        cur.close()
+
+        ano_r, mes_r, data_verificacao, origem_r, observacao_r = resultado
+        return {
+            'ano': ano_r,
+            'mes': mes_r,
+            'data_verificacao': data_verificacao,
+            'origem': origem_r,
+            'observacao': observacao_r,
+        }
+    except Exception as e:
+        conn.rollback()
+        raise RuntimeError(f"Erro ao registrar versão disponível: {e}")
+    finally:
+        return_connection(conn)
+
+
+def verificar_atualizacao_local():
+    """
+    Verifica se há atualização pendente usando somente dados locais do banco:
+    compara info_dados (versão carregada) com rfb_versao_disponivel (última
+    versão conhecida como disponível, populada manualmente via API).
+    Não faz nenhuma chamada de rede ao site da RFB.
+    """
+    try:
+        info_db = obter_registro_mais_recente_db()
+    except RuntimeError:
+        info_db = None
+
+    versao_disponivel = obter_versao_disponivel_db()
+
+    result = {"msg": "", "update": False}
+
+    if info_db:
+        result["versao_atual"] = f"{info_db['mes']:02d}/{info_db['ano']}"
+        result["data_ultima_atualizacao"] = str(info_db['data_atualizacao'])
+
+    if versao_disponivel is None:
+        result["msg"] = ("⚠️ Nenhuma verificação de versão disponível registrada ainda. "
+                          "Popule via POST /atualizar/versao-disponivel.")
+        return result
+
+    result["versao_disponivel_conhecida"] = f"{versao_disponivel['mes']:02d}/{versao_disponivel['ano']}"
+    result["data_verificacao_disponivel"] = str(versao_disponivel['data_verificacao'])
+
+    if info_db is None:
+        result["msg"] = (f"⚠️ Nenhuma versão carregada no banco. Versão disponível conhecida: "
+                          f"{versao_disponivel['mes']:02d}/{versao_disponivel['ano']}")
+        result["update"] = True
+        result["ano"] = versao_disponivel["ano"]
+        result["mes"] = versao_disponivel["mes"]
+        return result
+
+    tupla_disp = (versao_disponivel['ano'], versao_disponivel['mes'])
+    tupla_db = (info_db['ano'], info_db['mes'])
+
+    if tupla_disp > tupla_db:
+        result["msg"] = f"🆕 Nova versão disponível (registro local): {versao_disponivel['mes']:02d}/{versao_disponivel['ano']}"
+        result["update"] = True
+        result["ano"] = versao_disponivel["ano"]
+        result["mes"] = versao_disponivel["mes"]
+    else:
+        result["msg"] = f"✅ Banco está atualizado. Versão atual: {info_db['mes']:02d}/{info_db['ano']}"
+        result["update"] = False
+        result["ano"] = info_db["ano"]
+        result["mes"] = info_db["mes"]
+
+    return result
+
+
 def obter_registro_mais_recente_db():
     """
     Consulta a tabela info_dados e retorna o registro mais recente (ano, mes, data_atualizacao).
