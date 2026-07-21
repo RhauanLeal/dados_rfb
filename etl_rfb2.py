@@ -577,6 +577,7 @@ def verificar_nova_atualizacao(force_update=False):
         force_update: Se True, ignora verificação de versão e força atualização
     """
     criar_tabela_info_dados()
+    criar_tabela_versao_disponivel()
     lista_zips: list[str] = []
 
     try:
@@ -684,6 +685,27 @@ def criar_tabela_info_dados():
 
         conn.commit()
         logger.info("Tabelas info_dados e estruturas criadas/verificadas com sucesso!")
+    conn.close()
+    return True
+
+
+# Cria tabela rfb_versao_disponivel (usada pela API para checagem local de atualizacao)
+def criar_tabela_versao_disponivel():
+    conn, _ = connect_db()
+    with conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS rfb_versao_disponivel (
+            id SERIAL PRIMARY KEY,
+            ano INTEGER NOT NULL,
+            mes INTEGER NOT NULL,
+            data_verificacao TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            origem VARCHAR(20) NOT NULL DEFAULT 'manual',
+            observacao TEXT,
+            UNIQUE (ano, mes)
+        );
+        """)
+        conn.commit()
+        logger.info("Tabela rfb_versao_disponivel criada/verificada com sucesso!")
     conn.close()
     return True
 
