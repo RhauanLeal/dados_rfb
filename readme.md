@@ -56,6 +56,8 @@ observações:
 >
 > `info_dados`: dados da ultima atualização dos dados do ETL para verificar se os dados estão atualizados de acordo com o site da RFB
 >
+> `rfb_versao_disponivel`: tabela de controle de versões disponíveis para atualização (usada pela API para checagem local)
+>
 > `socios`: dados cadastrais dos sócios das empresas
 >
 > `socios_identificador`: tabela auxiliar com dados do tipo de sócio

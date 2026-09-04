@@ -710,6 +710,38 @@ def criar_tabela_versao_disponivel():
     return True
 
 
+# Verifica se tabelas de produção existem, cria se necessário (idempotent)
+def ensure_production_tables_exist():
+    """
+    Verifica se a tabela 'empresa' existe.
+    Se não existir, cria todas as tabelas de produção.
+    Otimizado para evitar overhead em execuções subsequentes.
+    """
+    conn, _ = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT EXISTS(
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'empresa'
+                )
+            """)
+            tables_exist = cur.fetchone()[0]
+
+        if not tables_exist:
+            logger.info("Tabelas de produção não encontradas. Criando...")
+            conn.close()
+            create_tables()
+        else:
+            logger.info("Tabelas de produção já existem.")
+            conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao verificar tabelas: {e}")
+        conn.close()
+        return False
+
+
 # Cria as tabelas no banco de dados se elas não existirem.
 def create_tables():
     """
@@ -1528,6 +1560,9 @@ def etl_process(processar_simples=True, force_update=False):
         # Abrir conexão para staging ANTES de preparar
         conn, engine = connect_db()
 
+        # Garantir que tabelas de produção existem (verificação rápida se já existem)
+        ensure_production_tables_exist()
+
         # Preparar tabelas de staging (não afeta leituras dos usuários)
         logger.info("Preparando tabelas de staging...")
         staging_mgr = StagingManager(conn)
@@ -1623,9 +1658,6 @@ def etl_process(processar_simples=True, force_update=False):
         arquivos_empresa_natureza_juridica.sort(key=lambda x: x[0])
         arquivos_pais.sort(key=lambda x: x[0])
         arquivos_socios_qualificacao.sort(key=lambda x: x[0])
-        
-        # Criar tabelas antes de inserir dados
-        create_tables()
 
         # Reutilizar conexão já aberta
         cur = conn.cursor()
