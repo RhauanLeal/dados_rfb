@@ -9,7 +9,7 @@ services:
       - ../dados_rfb:/code
       - ../dados_rfb_env:/dados_rfb_env:ro
     env_file:
-      - ../dados_rfb_env/.env
+      - ./.env
     environment:
       - TZ=America/Boa_Vista
       - MEMORY_LIMIT=6G  # Lido pelo etl_rfb2.py p/ dimensionar os chunks (respeitar mem_limit)
@@ -41,7 +41,7 @@ services:
       - ../dados_rfb:/code
       - ../dados_rfb_env:/dados_rfb_env:ro
     env_file:
-      - ../dados_rfb_env/.env
+      - ./.env
     environment:
       - TZ=America/Boa_Vista
     restart: unless-stopped
