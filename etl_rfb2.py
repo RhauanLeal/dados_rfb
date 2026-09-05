@@ -1560,6 +1560,16 @@ def etl_process(processar_simples=True, force_update=False):
         # Abrir conexão para staging ANTES de preparar
         conn, engine = connect_db()
 
+        # === OTIMIZAÇÕES DE I/O PARA BULK LOAD ===
+        # Staging é descartável (será swapped atomicamente), então sem necessidade de fsync
+        # Aumenta maintenance_work_mem para operações de bulk (COPY, sorting em chunks)
+        with conn.cursor() as cur:
+            cur.execute("SET synchronous_commit = OFF;")
+            cur.execute("SET maintenance_work_mem = '512MB';")
+            cur.execute("SET work_mem = '128MB';")
+            conn.commit()
+            logger.info("✓ Otimizações de I/O ativadas: synchronous_commit=OFF, maintenance_work_mem=512MB, work_mem=128MB")
+
         # Garantir que tabelas de produção existem (verificação rápida se já existem)
         ensure_production_tables_exist()
 
@@ -1726,10 +1736,11 @@ def etl_process(processar_simples=True, force_update=False):
                                     method=psql_insert_copy  # Chama a função que criamos acima
                                 )
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
-                                
+
                             except Exception as e:
-                                logger.error(f"Erro ao inserir via COPY: {e}")
-                                # Se falhar aqui, geralmente é erro de tipo de dado na coluna
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break 
                                 
                             finally:
@@ -1817,12 +1828,14 @@ def etl_process(processar_simples=True, force_update=False):
                                     con=engine,
                                     if_exists='append',
                                     index=False,
-                                    method=psql_insert_copy 
+                                    method=psql_insert_copy
                                 )
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
                             except Exception as e:
-                                logger.error(f"Erro no insert do chunk {i}: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -1904,12 +1917,14 @@ def etl_process(processar_simples=True, force_update=False):
                                     con=engine,
                                     if_exists='append',
                                     index=False,
-                                    method=psql_insert_copy  # Otimização vital
+                                    method=psql_insert_copy
                                 )
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                             except Exception as e:
-                                logger.error(f"Erro ao inserir chunk {i} de sócios: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (socios) via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -1995,12 +2010,14 @@ def etl_process(processar_simples=True, force_update=False):
                                         con=engine,
                                         if_exists='append',
                                         index=False,
-                                        method=psql_insert_copy # Função de alta performance
+                                        method=psql_insert_copy
                                     )
                                     logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                                 except Exception as e:
-                                    logger.error(f"Erro ao inserir chunk {i} de simples: {e}")
+                                    logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (simples) via COPY: {e}")
+                                    arquivos_com_erro.append(arquivo)
+                                    move_file_error(zip_path, arquivo)
                                     break
 
                                 finally:
@@ -2069,7 +2086,9 @@ def etl_process(processar_simples=True, force_update=False):
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                             except Exception as e:
-                                logger.error(f"Erro ao inserir chunk {i} de CNAE: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (cnae) via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -2139,7 +2158,9 @@ def etl_process(processar_simples=True, force_update=False):
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                             except Exception as e:
-                                logger.error(f"Erro ao inserir chunk {i} de estabelecimento_motivo: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (estabelecimento_motivo) via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -2209,7 +2230,9 @@ def etl_process(processar_simples=True, force_update=False):
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
                             except Exception as e:
-                                logger.error(f"Erro ao inserir chunk {i} de municípios: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (munic) via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -2280,7 +2303,9 @@ def etl_process(processar_simples=True, force_update=False):
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY!")
 
                             except Exception as e:
-                                logger.error(f"Erro ao inserir chunk {i} de empresa_natureza_juridica: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (empresa_natureza_juridica) via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -2351,7 +2376,9 @@ def etl_process(processar_simples=True, force_update=False):
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                             except Exception as e:
-                                logger.error(f"Erro ao inserir chunk {i} de países: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (pais) via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -2419,12 +2446,14 @@ def etl_process(processar_simples=True, force_update=False):
                                     con=engine,
                                     if_exists='append',
                                     index=False,
-                                    method=psql_insert_copy  # Otimização vital
+                                    method=psql_insert_copy
                                 )
                                 logger.info(f"Arquivo {arquivo} / parte {i} inserido via COPY com sucesso!")
 
                             except Exception as e:
-                                logger.error(f"Erro ao inserir chunk {i} de socios_qualificacao: {e}")
+                                logger.error(f"Erro crítico ao inserir chunk {i} de {arquivo} (socios_qualificacao) via COPY: {e}")
+                                arquivos_com_erro.append(arquivo)
+                                move_file_error(zip_path, arquivo)
                                 break
 
                             finally:
@@ -2442,18 +2471,27 @@ def etl_process(processar_simples=True, force_update=False):
 
         logger.info("Arquivos de socios_qualificacao finalizados!")
 
-
         gc.collect()
 
-        # Grava os dados e gera um txt com os arquivos com erro
+        # ===== VALIDAÇÃO CRÍTICA: Falha explícita se houve erros durante carga =====
         if arquivos_com_erro:
-            logger.warning(f"Arquivos com erro: {arquivos_com_erro}")
-            logger.warning(f"Arquivos com erro foram movidos para: {ERRO_FILES_PATH}")
-           
+            logger.error(f"❌ FALHA CRÍTICA: {len(arquivos_com_erro)} arquivo(s) com erro durante carga:")
+            for arquivo in arquivos_com_erro:
+                logger.error(f"   - {arquivo}")
+            logger.error(f"   Arquivos movidos para: {ERRO_FILES_PATH}")
+
             with open("arquivos_com_erro.txt", "w", encoding="utf-8") as f:
                 for nome in arquivos_com_erro:
                     f.write(nome + "\n")
-        
+
+            raise RuntimeError(
+                f"Falha na carga: {len(arquivos_com_erro)} arquivo(s) não foram processados com sucesso. "
+                f"Abortando para evitar dados parciais/inconsistentes no banco. "
+                f"Veja arquivos_com_erro.txt e {ERRO_FILES_PATH} para detalhes."
+            )
+
+        logger.info("✓ Validação: Todos os arquivos foram carregados com sucesso (sem erros críticos)")
+
         # Inserir os dados da ultima atualização na tabela info_dados
         inserir_info_dados(info)
 
@@ -2474,6 +2512,10 @@ def etl_process(processar_simples=True, force_update=False):
         logger.info("⚡ Fazendo swap das tabelas (bloqueio mínimo)...")
         staging_mgr.swap_all_tables()
         logger.info("✅ Todos os dados estão disponíveis para consulta!")
+
+        # ===== LIMPEZA: Remover tabelas staging após swap bem-sucedido =====
+        logger.info("🗑️  Limpando tabelas de staging (liberando espaço em disco)...")
+        staging_mgr.drop_staging_tables()
 
         # Criação dos índices (após swap, nas tabelas originais)
         logger.info("📊 Criando índices para otimização de performance...")

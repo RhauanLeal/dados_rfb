@@ -259,7 +259,7 @@ class StagingManager:
         self.conn = conn
 
     def prepare_staging(self) -> None:
-        """Cria tabelas staging como cópias vazias das originais."""
+        """Cria tabelas staging como UNLOGGED (sem WAL — otimizado para bulk load)."""
         with self.conn.cursor() as cursor:
             for table_name in self.STAGING_TABLES:
                 staging_name = f"{table_name}_staging"
@@ -267,11 +267,11 @@ class StagingManager:
                     logger.info(f"Preparando staging para {table_name}...")
                     cursor.execute(f'DROP TABLE IF EXISTS "{staging_name}";')
                     cursor.execute(f"""
-                        CREATE TABLE "{staging_name}" AS
+                        CREATE UNLOGGED TABLE "{staging_name}" AS
                         SELECT * FROM "{table_name}" LIMIT 0;
                     """)
                     self.conn.commit()
-                    logger.info(f"✓ Staging '{staging_name}' preparado")
+                    logger.info(f"✓ Staging UNLOGGED '{staging_name}' preparado (sem WAL)")
                 except Exception as e:
                     logger.error(f"Erro ao preparar staging de {table_name}: {e}")
                     self.conn.rollback()
@@ -396,6 +396,20 @@ class StagingManager:
             cursor.close()
             # Voltar ao isolamento padrão
             self.conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_READ_COMMITTED)
+
+    def drop_staging_tables(self) -> None:
+        """Droppa todas as staging tables para liberar espaço em disco."""
+        logger.info("🗑️  Limpando tabelas staging (liberando espaço em disco)...")
+        with self.conn.cursor() as cursor:
+            for table_name in self.STAGING_TABLES:
+                staging_name = f"{table_name}_staging"
+                try:
+                    cursor.execute(f'DROP TABLE IF EXISTS "{staging_name}";')
+                    self.conn.commit()
+                    logger.info(f"✓ Staging '{staging_name}' removida")
+                except Exception as e:
+                    logger.warning(f"⚠️  Erro ao remover staging {staging_name}: {e}")
+                    self.conn.rollback()
 
 
 class AdvisoryLock:
