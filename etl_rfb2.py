@@ -1399,40 +1399,47 @@ def criar_indices(update=False):
             ("simples", "cnpj_basico"),   # crítico para joins/lookups em simples (NOVO: antes ausente)
         ]
 
+        # 3. Índices compostos para otimizar buscas por múltiplas colunas (API endpoints)
+        indices_compostos = [
+            ("estabelecimento", ["uf", "municipio"], "idx_estabelecimento_uf_municipio"),
+            ("estabelecimento", ["uf", "municipio", "cnpj_basico"], "idx_estabelecimento_uf_municipio_cnpj"),
+        ]
+
+        total_indices = len(indices_extras) + len(indices_compostos)
+        indice_atual = 0
+
+        logger.info(f"Criando {total_indices} índices...")
+
         for tabela, coluna in indices_extras:
+            indice_atual += 1
             nome_indice = f"idx_{tabela}_{coluna}"
             try:
-                logger.info(f"Criando índice {nome_indice}...")
+                logger.info(f"Criando índice {indice_atual} de {total_indices}: {nome_indice}...")
                 # CONCURRENTLY evita travar tabela; IF NOT EXISTS evita erro em reexecução.
                 sql = (
                     f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} "
                     f"ON {tabela} ({coluna});"
                 )
                 cur.execute(sql)
-                logger.info(f"Índice {nome_indice} finalizado.")
+                logger.info(f"✓ Índice {indice_atual} de {total_indices} finalizado: {nome_indice}")
             except Exception as e:
-                logger.error(f"Erro ao criar o índice {nome_indice}: {e}")
+                logger.error(f"Erro ao criar o índice {indice_atual} de {total_indices} ({nome_indice}): {e}")
                 conn.rollback()
 
-        # 3. Índices compostos para otimizar buscas por múltiplas colunas (API endpoints)
         logger.info("Criando índices compostos para endpoints de busca...")
-        indices_compostos = [
-            ("estabelecimento", ["uf", "municipio"], "idx_estabelecimento_uf_municipio"),
-            ("estabelecimento", ["uf", "municipio", "cnpj_basico"], "idx_estabelecimento_uf_municipio_cnpj"),
-        ]
-
         for tabela, colunas, nome_indice in indices_compostos:
+            indice_atual += 1
             try:
-                logger.info(f"Criando índice composto {nome_indice}...")
+                logger.info(f"Criando índice {indice_atual} de {total_indices}: {nome_indice}...")
                 colunas_str = ", ".join(colunas)
                 sql = (
                     f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome_indice} "
                     f"ON {tabela} ({colunas_str});"
                 )
                 cur.execute(sql)
-                logger.info(f"Índice composto {nome_indice} finalizado.")
+                logger.info(f"✓ Índice {indice_atual} de {total_indices} finalizado: {nome_indice}")
             except Exception as e:
-                logger.error(f"Erro ao criar o índice composto {nome_indice}: {e}")
+                logger.error(f"Erro ao criar o índice {indice_atual} de {total_indices} ({nome_indice}): {e}")
                 conn.rollback()
 
         # Atualiza estatísticas do planner após indexação
