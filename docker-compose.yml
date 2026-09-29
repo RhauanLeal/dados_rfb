@@ -1,3 +1,16 @@
+# ============================================================
+# DADOS RFB - ETL mensal (CNPJ) + API de consulta
+# Servidor compartilhado com o Postgres do snfisc, o snfisc e o MinIO.
+# Rode o ETL fora do horário de expediente: ele sobe para 6 GB e
+# disputa o HDD com o Postgres.
+# ============================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   etl:
     build:
@@ -13,21 +26,18 @@ services:
     environment:
       - TZ=America/Boa_Vista
       - MEMORY_LIMIT=6G  # Lido pelo etl_rfb2.py p/ dimensionar os chunks (respeitar mem_limit)
-    restart: no
-    # === LIMITES DE RECURSOS ===
-    # Servidor COMPARTILHADO (Xeon E5-2609 v2, 4c/4t, 32GB, HDD) com o Postgres
-    # do snfisc, o snfisc e o MinIO. O ETL roda 1x/mes, entao os tetos protegem
-    # a producao durante a janela de carga.
-    cpus: 1.5                # transform em pandas e single-thread (GIL); 1.5 sobra
-    mem_limit: 6g            # margem real dentro do orcamento de RAM da maquina
-    mem_reservation: 4g      # Reserva mínima 4GB
-    # === OTIMIZAÇÕES DOCKER ===
-    shm_size: '1gb'                   # Suficiente para pandas
+    restart: "no"
+    # transform em pandas é single-thread (GIL); 1.5 sobra
+    cpus: 1.5
+    mem_limit: 6g
+    mem_reservation: 4g
+    shm_size: '1gb'
     ulimits:
       nproc: 65535
       nofile:
         soft: 65535
         hard: 65535
+    logging: *default-logging
     networks:
       - snfisc-network
 
@@ -46,9 +56,14 @@ services:
       - TZ=America/Boa_Vista
     restart: unless-stopped
     ports:
-      - "8001:8000"
+      # Antes "8001:8000" = aberta para qualquer origem (o Docker ignora o ufw
+      # e não há regra 8001 no ufw). O snfisc alcança por dados_rfb-api:8000
+      # na rede interna; publique via Nginx se precisar de acesso externo.
+      - "127.0.0.1:8001:8000"
+    cpus: 1.0
     mem_limit: 1g
     mem_reservation: 512m
+    logging: *default-logging
     networks:
       - snfisc-network
 
